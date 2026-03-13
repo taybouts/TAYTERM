@@ -1,0 +1,30 @@
+# SSL certs
+.tayterm_cert.pem
+.tayterm_key.pem
+
+# Runtime
+.tayterm_server.log
+.tayterm_history/
+.tayterm_uploads/
+
+# Old/reference code
+web_terminal.py
+vanilla_terminal.py
+test_terminal.html
+ttyd.exe
+ttyd_runner.bat
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude
+.claude/
+
+# Environment
+.env
