@@ -18,6 +18,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefm
 log = logging.getLogger("tayterm")
 
 PROJECTS_DIR = r"C:\Users\taybo\Dropbox\CODEAI"
+CLAUDE_PROJECTS_DIR = os.path.join(os.path.expanduser("~"), ".claude", "projects")
 CLAUDE_CMD = "claude --dangerously-skip-permissions"
 
 # Per-session PTY sessions: { "ProjectName:claude" or "ProjectName:shell": { "terminal": Terminal, "task": Task, "subscribers": set() } }
@@ -130,7 +131,14 @@ def get_projects():
         shell_live = (shell_key in active_terminals and
                       active_terminals[shell_key].get("terminal") and
                       active_terminals[shell_key]["terminal"].is_alive())
-        is_live = claude_live or shell_live
+        is_live = claude_live
+        # Check Claude conversation files
+        claude_proj_key = path.replace("\\", "-").replace("/", "-").replace(":", "-")
+        claude_conv_dir = os.path.join(CLAUDE_PROJECTS_DIR, claude_proj_key)
+        conv_count = 0
+        if os.path.isdir(claude_conv_dir):
+            conv_count = sum(1 for f in os.listdir(claude_conv_dir) if f.endswith(".jsonl"))
+        has_conversations = conv_count > 0
         sub_count = 0
         if claude_live: sub_count += len(active_terminals[claude_key]["subscribers"])
         if shell_live: sub_count += len(active_terminals[shell_key]["subscribers"])
@@ -142,6 +150,8 @@ def get_projects():
             "live": is_live,
             "claude_live": claude_live,
             "shell_live": shell_live,
+            "can_continue": has_conversations and not claude_live,
+            "conv_count": conv_count,
             "subscribers": sub_count,
             "desc": desc,
         })
@@ -206,6 +216,13 @@ HTML = '''<!DOCTYPE html>
     font-size: 18px; font-weight: 700; color: var(--green); letter-spacing: 4px;
     text-transform: uppercase; text-shadow: 0 0 20px var(--green-glow), 0 0 40px var(--green-glow);
   }
+  #picker-right { display: flex; align-items: center; gap: 4px; }
+  #new-project-btn {
+    background: none; border: 1px solid var(--border); color: var(--green-dark); font-size: 10px;
+    cursor: pointer; padding: 3px 10px; font-family: inherit; letter-spacing: 1px;
+    text-transform: uppercase; transition: all 0.2s;
+  }
+  #new-project-btn:hover { border-color: var(--green); color: var(--green); text-shadow: 0 0 5px var(--green-glow); }
   #gear-btn {
     background: none; border: none; color: var(--green-dark); font-size: 16px;
     cursor: pointer; padding: 4px 8px; transition: all 0.3s; opacity: 0.4;
@@ -217,8 +234,8 @@ HTML = '''<!DOCTYPE html>
   }
   .project-card {
     background: var(--surface); border: 1px solid var(--border);
-    padding: 14px; cursor: pointer; transition: all 0.15s;
-    display: flex; flex-direction: column; min-height: 90px;
+    padding: 12px; cursor: pointer; transition: all 0.15s;
+    display: flex; flex-direction: column;
   }
   .project-card:hover { border-color: var(--green-dim); background: rgba(0,255,65,0.05); }
   .project-card.live {
@@ -226,19 +243,13 @@ HTML = '''<!DOCTYPE html>
     box-shadow: 0 0 8px var(--green-glow);
   }
   .project-name {
-    font-size: 13px; font-weight: 600; margin-bottom: 8px; color: var(--accent);
+    font-size: 12px; font-weight: 600; margin-bottom: 6px; color: var(--accent);
     letter-spacing: 1px;
   }
-  .project-badges { display: flex; gap: 6px; flex-wrap: wrap; }
-  .project-desc {
-    font-size: 10px; color: var(--text2); margin-bottom: 6px;
-    line-height: 1.3; overflow: hidden; text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .project-badges { flex: 1; }
-  .project-actions { display: flex; gap: 4px; margin-top: 8px; }
+  .project-badges { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 6px; min-height: 18px; }
+  .project-actions { display: flex; flex-direction: column; gap: 4px; margin-top: 2px; }
   .project-actions button {
-    font-size: 10px; padding: 3px 10px; cursor: pointer; font-family: inherit;
+    font-size: 10px; padding: 6px 8px; cursor: pointer; font-family: inherit;
     border: 1px solid var(--green-dim); background: transparent; color: var(--green-dim);
     letter-spacing: 1px; text-transform: uppercase; transition: all 0.2s;
   }
@@ -246,13 +257,35 @@ HTML = '''<!DOCTYPE html>
     background: rgba(0,255,65,0.1); border-color: var(--green);
     color: var(--green); text-shadow: 0 0 10px var(--green-glow);
   }
-  .project-actions .btn-shell {
-    border-color: var(--green-dim); color: var(--green-dim); font-size: 11px;
-    padding: 4px 14px; font-weight: 700;
+  .btn-primary {
+    width: 100%; padding: 8px !important; font-size: 11px !important; font-weight: 700;
+    border-color: var(--green) !important; color: var(--green) !important;
+    text-shadow: 0 0 8px var(--green-glow);
   }
-  .project-actions .btn-shell:hover {
+  .btn-primary:hover { background: rgba(0,255,65,0.15) !important; }
+  .actions-row { display: flex; gap: 4px; }
+  .actions-row button { flex: 1; }
+  .actions-row .btn-shell:hover {
     background: rgba(0,204,255,0.15); border-color: var(--cyan); color: var(--cyan);
     text-shadow: 0 0 10px rgba(0,204,255,0.4);
+  }
+  .actions-row .btn-kill {
+    border-color: var(--border); color: var(--text2); flex: 0 0 auto;
+  }
+  .actions-row .btn-kill:hover {
+    background: rgba(255,0,64,0.15); border-color: var(--red); color: var(--red);
+    text-shadow: 0 0 10px var(--red-glow);
+  }
+  .actions-row .btn-dim {
+    border-color: var(--border); color: var(--text2);
+  }
+  .actions-row .btn-dim:hover {
+    border-color: var(--green-dim); color: var(--green-dim);
+  }
+  .project-desc {
+    font-size: 9px; color: var(--text2); margin-top: 6px; flex: 1;
+    line-height: 1.3; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .badge {
     font-size: 9px; font-weight: 700; padding: 2px 6px; letter-spacing: 1px;
@@ -310,6 +343,12 @@ HTML = '''<!DOCTYPE html>
   }
   .layout-btn:hover { border-color: var(--green-dim); color: var(--green-dim); }
   .layout-btn.active { border-color: var(--green); color: var(--green); text-shadow: 0 0 5px var(--green-glow); }
+  #fullscreen-btn {
+    background: none; border: 1px solid var(--border); color: var(--text2);
+    padding: 2px 6px; cursor: pointer; font-size: 10px; font-family: inherit;
+    margin-left: 4px;
+  }
+  #fullscreen-btn:hover { border-color: var(--green-dim); color: var(--green-dim); }
 
   /* ── Pane layouts ── */
   #pane-area { flex: 1; display: flex; overflow: hidden; }
@@ -338,6 +377,35 @@ HTML = '''<!DOCTYPE html>
     text-transform: uppercase; letter-spacing: 4px;
   }
   #drop-overlay.active { display: flex; }
+
+  /* ── Loading Overlay ── */
+  .loading-overlay {
+    position: absolute; inset: 0; z-index: 50;
+    background: #000;
+  }
+  .loading-indicator {
+    position: absolute; bottom: 40px; right: 40px;
+    display: flex; align-items: center; gap: 12px;
+  }
+  .loading-indicator .loading-label {
+    font-size: 16px; color: var(--green-dim); letter-spacing: 4px;
+    text-transform: uppercase;
+  }
+  .loading-indicator .mini-logos {
+    display: flex; gap: 5px; align-items: center;
+  }
+  .loading-indicator .mini-logo {
+    opacity: 0; animation: logo-pop 1.5s ease-in-out infinite;
+  }
+  .loading-indicator .mini-logo:nth-child(1) { animation-delay: 0s; }
+  .loading-indicator .mini-logo:nth-child(2) { animation-delay: 0.3s; }
+  .loading-indicator .mini-logo:nth-child(3) { animation-delay: 0.6s; }
+  .loading-indicator .mini-logo:nth-child(4) { animation-delay: 0.9s; }
+  .loading-indicator .mini-logo canvas { image-rendering: pixelated; }
+  @keyframes logo-pop {
+    0%, 100% { opacity: 0; transform: scale(0.8); }
+    30%, 70% { opacity: 1; transform: scale(1); }
+  }
 
   /* ── Settings Panel ── */
   #settings-panel {
@@ -394,6 +462,75 @@ HTML = '''<!DOCTYPE html>
   }
   #settings-close:hover { color: var(--red); }
 
+  /* ── Confirm Modal ── */
+  #confirm-modal {
+    display: none; position: fixed; inset: 0; z-index: 210;
+    background: transparent; justify-content: center; align-items: center;
+  }
+  #confirm-modal.active { display: flex; }
+  .confirm-panel {
+    background: rgba(0,0,0,0.92); border: 1px solid var(--green-dark);
+    padding: 24px 28px; text-align: center; min-width: 300px;
+  }
+  .confirm-panel p {
+    font-size: 14px; color: var(--green-dim); margin-bottom: 20px;
+    letter-spacing: 1px;
+  }
+  .confirm-btns { display: flex; gap: 10px; justify-content: center; }
+  .confirm-btns button {
+    font-size: 12px; padding: 8px 20px; cursor: pointer; font-family: inherit;
+    border: 1px solid var(--border); background: transparent; color: var(--text2);
+    letter-spacing: 1px; text-transform: uppercase; transition: all 0.2s;
+  }
+  .confirm-btns .btn-yes {
+    border-color: var(--green); color: var(--green);
+  }
+  .confirm-btns .btn-yes:hover { background: rgba(0,255,65,0.15); }
+  .confirm-btns .btn-no:hover { border-color: var(--red); color: var(--red); }
+
+  /* ── Resume Modal ── */
+  #resume-modal {
+    display: none; position: fixed; inset: 0; z-index: 200;
+    background: transparent; justify-content: center; align-items: center;
+  }
+  #resume-modal.active { display: flex; }
+  .resume-panel {
+    background: rgba(0,0,0,0.92); border: 1px solid var(--green-dark);
+    width: 650px; max-width: 92vw; max-height: 75vh; display: flex; flex-direction: column;
+  }
+  .resume-header {
+    display: flex; align-items: center; padding: 14px 18px;
+    border-bottom: 1px solid var(--border);
+  }
+  .resume-header h2 {
+    font-size: 14px; color: var(--green); letter-spacing: 2px;
+    text-transform: uppercase; flex: 1;
+  }
+  .resume-close {
+    background: none; border: none; color: var(--text2); font-size: 20px;
+    cursor: pointer; padding: 0 6px;
+  }
+  .resume-close:hover { color: var(--red); }
+  .resume-list {
+    flex: 1; overflow-y: auto; padding: 4px 0;
+  }
+  .resume-list::-webkit-scrollbar { width: 6px; }
+  .resume-list::-webkit-scrollbar-track { background: #000; }
+  .resume-list::-webkit-scrollbar-thumb { background: var(--green-dark); }
+  .resume-item {
+    padding: 14px 18px; cursor: pointer; border-bottom: 1px solid rgba(0,51,0,0.3);
+    transition: all 0.1s;
+  }
+  .resume-item:hover { background: rgba(0,255,65,0.05); }
+  .resume-item-top { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
+  .resume-date { font-size: 15px; color: var(--green); font-weight: 700; }
+  .resume-time { font-size: 14px; color: var(--text2); }
+  .resume-id { font-size: 11px; color: var(--text2); margin-left: auto; opacity: 0.5; }
+  .resume-preview {
+    font-size: 14px; color: var(--text2); line-height: 1.4;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
   /* ── Matrix Rain ── */
   #matrix-bg {
     position: fixed; top: 0; left: 0; width: 100%; height: 100%;
@@ -407,7 +544,7 @@ HTML = '''<!DOCTYPE html>
 
 <!-- Project Picker -->
 <div id="picker">
-  <div id="picker-header"><h1>> TAYTERM_</h1><button id="gear-btn" title="Settings">&#9881;</button></div>
+  <div id="picker-header"><h1>> TAYTERM_</h1><div id="picker-right"><button id="new-project-btn" onclick="newProject()">+ New</button><button id="gear-btn" title="Settings">&#9881;</button></div></div>
   <div id="project-grid"></div>
 </div>
 
@@ -421,12 +558,35 @@ HTML = '''<!DOCTYPE html>
       <button class="layout-btn" data-layout="hsplit" onclick="setLayout('hsplit')">&#9646;&#9646;</button>
       <button class="layout-btn" data-layout="vsplit" onclick="setLayout('vsplit')">&#9620;&#9620;</button>
       <button class="layout-btn" data-layout="quad" onclick="setLayout('quad')">&#9638;</button>
+      <button id="fullscreen-btn" onclick="toggleFullscreen()" title="Fullscreen">&#x26F6;</button>
     </div>
   </div>
   <div id="pane-area" class="layout-single"></div>
 </div>
 
 <div id="drop-overlay">DROP FILE</div>
+
+<!-- Confirm Modal -->
+<div id="confirm-modal" onclick="if(event.target===this)closeConfirm()">
+  <div class="confirm-panel">
+    <p id="confirm-msg"></p>
+    <div class="confirm-btns">
+      <button class="btn-no" onclick="closeConfirm()">Cancel</button>
+      <button class="btn-yes" id="confirm-yes">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- Resume Modal -->
+<div id="resume-modal" onclick="if(event.target===this)closeResumeModal()">
+  <div class="resume-panel">
+    <div class="resume-header">
+      <h2 id="resume-title">Resume Session</h2>
+      <button class="resume-close" onclick="closeResumeModal()">&times;</button>
+    </div>
+    <div class="resume-list" id="resume-list"></div>
+  </div>
+</div>
 
 <!-- Settings Panel -->
 <div id="settings-panel">
@@ -523,15 +683,35 @@ async function loadProjects() {
     if (p.subscribers > 0) badges += '<span class="badge badge-subs">' + p.subscribers + '</span>';
     if (p.claude) badges += '<span class="badge badge-claude">CLAUDE</span>';
     if (p.git) badges += '<span class="badge badge-git">GIT</span>';
+    let actionsHtml = '';
+    if (p.claude_live) {
+      actionsHtml =
+        '<button class="btn-primary" onclick="event.stopPropagation(); openSession(\\'' + p.name + '\\', false)">Claude</button>' +
+        '<div class="actions-row">' +
+          '<button class="btn-shell" onclick="event.stopPropagation(); openSession(\\'' + p.name + '\\', true)">Shell</button>' +
+          '<button class="btn-kill" onclick="event.stopPropagation(); killProject(\\'' + p.name + '\\')">Kill</button>' +
+        '</div>';
+    } else if (p.can_continue) {
+      actionsHtml =
+        '<button class="btn-primary" onclick="event.stopPropagation(); continueSession(\\'' + p.name + '\\')">Continue</button>' +
+        '<div class="actions-row">' +
+          '<button class="btn-dim" onclick="event.stopPropagation(); confirmNewSession(\\'' + p.name + '\\')">New</button>' +
+          '<button class="btn-dim" onclick="event.stopPropagation(); resumeSession(\\'' + p.name + '\\')">Resume (' + p.conv_count + ')</button>' +
+          '<button class="btn-shell" onclick="event.stopPropagation(); openSession(\\'' + p.name + '\\', true)">Shell</button>' +
+        '</div>';
+    } else {
+      actionsHtml =
+        '<button class="btn-primary" onclick="event.stopPropagation(); openSession(\\'' + p.name + '\\', false)">Claude</button>' +
+        '<div class="actions-row">' +
+          '<button class="btn-shell" onclick="event.stopPropagation(); openSession(\\'' + p.name + '\\', true)">Shell</button>' +
+        '</div>';
+    }
     card.innerHTML =
       '<div class="project-name">' + p.name + '</div>' +
-      (p.desc ? '<div class="project-desc">' + p.desc + '</div>' : '') +
       '<div class="project-badges">' + badges + '</div>' +
-      '<div class="project-actions">' +
-        '<button onclick="event.stopPropagation(); openSession(\\'' + p.name + '\\', false)">Claude</button>' +
-        '<button class="btn-shell" onclick="event.stopPropagation(); openSession(\\'' + p.name + '\\', true)">Shell</button>' +
-      '</div>';
-    card.onclick = () => openSession(p.name, false);
+      '<div class="project-actions">' + actionsHtml + '</div>' +
+      (p.desc ? '<div class="project-desc">' + p.desc + '</div>' : '<div class="project-desc">&nbsp;</div>');
+    card.onclick = () => p.can_continue ? continueSession(p.name) : openSession(p.name, false);
     grid.appendChild(card);
   }
 }
@@ -546,13 +726,132 @@ function showPicker() {
 }
 
 // ══════════════════════════════════════════
+//  Kill / Fullscreen / New Project
+// ══════════════════════════════════════════
+async function confirmNewSession(name) {
+  showConfirm('Start a fresh Claude session?', () => openSession(name, false));
+}
+
+function showConfirm(msg, onYes) {
+  document.getElementById('confirm-msg').textContent = msg;
+  const yes = document.getElementById('confirm-yes');
+  yes.onclick = () => { closeConfirm(); onYes(); };
+  document.getElementById('confirm-modal').classList.add('active');
+}
+function closeConfirm() {
+  document.getElementById('confirm-modal').classList.remove('active');
+}
+
+async function resumeSession(name) {
+  const resp = await fetch('/api/sessions?name=' + encodeURIComponent(name));
+  const data = await resp.json();
+  const list = document.getElementById('resume-list');
+  document.getElementById('resume-title').textContent = name + ' — Sessions';
+  list.innerHTML = '';
+  for (const s of data.sessions) {
+    const item = document.createElement('div');
+    item.className = 'resume-item';
+    item.innerHTML =
+      '<div class="resume-item-top">' +
+        '<span class="resume-date">' + s.date + '</span>' +
+        '<span class="resume-time">' + s.time + '</span>' +
+        '<span class="resume-id">' + s.id.substring(0, 8) + '</span>' +
+      '</div>' +
+      '<div class="resume-preview">' + (s.preview || '(no preview)') + '</div>';
+    item.onclick = () => { closeResumeModal(); pickSession(name, s.id); };
+    list.appendChild(item);
+  }
+  document.getElementById('resume-modal').classList.add('active');
+}
+
+function closeResumeModal() {
+  document.getElementById('resume-modal').classList.remove('active');
+}
+
+function pickSession(name, sessionId) {
+  const id = name + ':claude';
+  if (sessions[id]) closeTab(id);
+  openSession(name, false, false, sessionId);
+}
+
+function continueSession(name) {
+  const id = sessionId(name, false);
+  // Close existing dead tab if any
+  if (sessions[id]) closeTab(id);
+  // Open with continue flag
+  openSession(name, false, true, null);
+}
+
+async function killProject(name) {
+  await fetch('/api/kill', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name: name})});
+  // Close tabs for this project
+  for (const id of Object.keys(sessions)) {
+    if (id.startsWith(name + ':')) closeTab(id);
+  }
+  loadProjects();
+}
+
+function toggleFullscreen() {
+  if (!document.fullscreenElement) {
+    document.documentElement.requestFullscreen();
+  } else {
+    document.exitFullscreen();
+  }
+}
+
+function newProject() {
+  const name = prompt('Project name:');
+  if (!name || !name.trim()) return;
+  fetch('/api/new-project', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name: name.trim()})})
+    .then(r => r.json()).then(result => {
+      if (result.error) { alert(result.error); return; }
+      loadProjects();
+    });
+}
+
+// ══════════════════════════════════════════
+//  Pixel Claude Sprite
+// ══════════════════════════════════════════
+function drawMiniClaude(el) {
+  const img = new Image();
+  img.onload = function() {
+    const c = document.createElement('canvas');
+    c.width = img.width;
+    c.height = img.height;
+    c.style.width = Math.round(img.width * 0.2) + 'px';
+    c.style.height = Math.round(img.height * 0.2) + 'px';
+    c.style.imageRendering = 'pixelated';
+    const ctx = c.getContext('2d');
+
+    const tmp = document.createElement('canvas');
+    tmp.width = img.width; tmp.height = img.height;
+    const tctx = tmp.getContext('2d');
+    tctx.drawImage(img, 0, 0);
+    const imgData = tctx.getImageData(0, 0, tmp.width, tmp.height);
+    const d = imgData.data;
+
+    ctx.fillStyle = '#00ff41';
+    for (let y = 0; y < img.height; y++) {
+      for (let x = 0; x < img.width; x++) {
+        const i = (y * img.width + x) * 4;
+        if (d[i+3] > 128 && (d[i] + d[i+1] + d[i+2]) > 80) {
+          ctx.fillRect(x, y, 1, 1);
+        }
+      }
+    }
+    el.appendChild(c);
+  };
+  img.src = '/api/claude-logo';
+}
+
+// ══════════════════════════════════════════
 //  Session management
 // ══════════════════════════════════════════
 function sessionId(name, isShell) {
   return name + (isShell ? ':shell' : ':claude');
 }
 
-function openSession(name, isShell) {
+function openSession(name, isShell, continueFlag, resumeId) {
   const id = sessionId(name, isShell);
 
   // If already open, just switch to it
@@ -568,13 +867,30 @@ function openSession(name, isShell) {
 
   // Create container
   const container = document.createElement('div');
-  container.style.cssText = 'width:100%;height:100%;display:none;';
+  container.style.cssText = 'width:100%;height:100%;display:none;position:relative;';
+
+  // Loading overlay with running pixel Claude logo
+  const loader = document.createElement('div');
+  loader.className = 'loading-overlay';
+  loader.innerHTML =
+    '<div class="loading-indicator">' +
+      '<span class="loading-label">' + (isShell ? 'SHELL' : 'LOADING') + '</span>' +
+      '<div class="mini-logos">' +
+        '<div class="mini-logo"></div>' +
+        '<div class="mini-logo"></div>' +
+        '<div class="mini-logo"></div>' +
+        '<div class="mini-logo"></div>' +
+      '</div>' +
+    '</div>';
+  container.appendChild(loader);
+  loader.querySelectorAll('.mini-logo').forEach(el => drawMiniClaude(el));
 
   // Create terminal
   const term = new Terminal({
     cursorBlink: true,
     scrollback: 5000,
     fontSize: 17,
+    fontFamily: 'courier-new, courier, monospace',
     theme: { background: '#000' },
   });
   const fitAddon = new FitAddon.FitAddon();
@@ -584,8 +900,18 @@ function openSession(name, isShell) {
 
   // Connect WebSocket
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const params = 'project=' + encodeURIComponent(name) + (isShell ? '' : '&claude=1');
+  const params = 'project=' + encodeURIComponent(name) + (isShell ? '' : resumeId ? '&resume=' + resumeId : continueFlag ? '&continue=1' : '&claude=1');
   const ws = new WebSocket(proto + '//' + location.host + '/ws?' + params);
+
+  let loaderDismissed = false;
+  function dismissLoader() {
+    if (!loaderDismissed && loader.parentNode) {
+      loaderDismissed = true;
+      loader.style.transition = 'opacity 0.3s';
+      loader.style.opacity = '0';
+      setTimeout(() => loader.remove(), 300);
+    }
+  }
 
   const session = { name, term, ws, fitAddon, container, isShell };
   sessions[id] = session;
@@ -602,7 +928,10 @@ function openSession(name, isShell) {
   ws.onmessage = (e) => {
     try {
       const msg = JSON.parse(e.data);
-      if (msg.type === 'output') term.write(msg.data);
+      if (msg.type === 'output') {
+        term.write(msg.data);
+        dismissLoader();
+      }
     } catch(err) {}
   };
 
@@ -1042,11 +1371,112 @@ async def index(request):
                         headers={"Cache-Control": "no-store"})
 
 
+async def claude_logo(request):
+    """Serve the Claude pixel logo."""
+    logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude_logo.png")
+    if os.path.exists(logo_path):
+        return web.FileResponse(logo_path, headers={"Cache-Control": "public, max-age=86400"})
+    return web.Response(status=404)
+
+
 async def api_projects(request):
     """List all projects with metadata."""
     loop = asyncio.get_event_loop()
     projects = await loop.run_in_executor(None, get_projects)
     return web.json_response(projects)
+
+
+async def api_kill(request):
+    """Kill all PTYs for a project."""
+    data = await request.json()
+    name = data.get("name", "")
+    killed = []
+    for key_type in ["claude", "shell"]:
+        key = f"{name}:{key_type}"
+        if key in active_terminals:
+            entry = active_terminals[key]
+            term = entry.get("terminal")
+            if term and term.is_alive():
+                term.kill()
+                killed.append(key_type)
+            # Notify subscribers
+            for ws in list(entry["subscribers"]):
+                try:
+                    await ws.send_json({"type": "status", "data": "killed"})
+                    await ws.close()
+                except:
+                    pass
+            entry["subscribers"].clear()
+            entry["terminal"] = None
+    log.info(f"Killed: {name} ({', '.join(killed) if killed else 'nothing running'})")
+    return web.json_response({"killed": killed})
+
+
+async def api_sessions(request):
+    """List Claude conversation sessions for a project."""
+    name = request.query.get("name", "")
+    project_path = os.path.join(PROJECTS_DIR, name)
+    if not os.path.isdir(project_path):
+        return web.json_response({"sessions": []})
+    claude_proj_key = project_path.replace("\\", "-").replace("/", "-").replace(":", "-")
+    conv_dir = os.path.join(CLAUDE_PROJECTS_DIR, claude_proj_key)
+    if not os.path.isdir(conv_dir):
+        return web.json_response({"sessions": []})
+
+    import datetime
+    sessions_list = []
+    for fname in os.listdir(conv_dir):
+        if not fname.endswith(".jsonl"):
+            continue
+        fpath = os.path.join(conv_dir, fname)
+        sid = fname.replace(".jsonl", "")
+        mtime = os.path.getmtime(fpath)
+        dt = datetime.datetime.fromtimestamp(mtime)
+        # Get first user message as preview
+        preview = ""
+        try:
+            with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    try:
+                        obj = json.loads(line)
+                        if obj.get("type") == "user":
+                            content = obj.get("message", {}).get("content", "")
+                            if isinstance(content, list):
+                                for c in content:
+                                    if isinstance(c, dict) and c.get("type") == "text":
+                                        preview = c["text"][:100].replace("\n", " ")
+                                        break
+                            elif isinstance(content, str):
+                                preview = content[:100].replace("\n", " ")
+                            if preview:
+                                break
+                    except:
+                        pass
+        except:
+            pass
+        sessions_list.append({
+            "id": sid,
+            "date": dt.strftime("%d-%m-%y"),
+            "time": dt.strftime("%H:%M"),
+            "timestamp": mtime,
+            "preview": preview,
+        })
+    sessions_list.sort(key=lambda s: s["timestamp"], reverse=True)
+    return web.json_response({"sessions": sessions_list})
+
+
+async def api_new_project(request):
+    """Create a new project folder."""
+    data = await request.json()
+    name = data.get("name", "").strip()
+    if not name or "/" in name or "\\" in name or ".." in name:
+        return web.json_response({"error": "Invalid project name"}, status=400)
+    path = os.path.join(PROJECTS_DIR, name)
+    if os.path.exists(path):
+        return web.json_response({"error": "Project already exists"}, status=400)
+    os.makedirs(path)
+    log.info(f"Created project: {name}")
+    return web.json_response({"created": name})
 
 
 async def upload_handler(request):
@@ -1088,8 +1518,10 @@ async def ws_handler(request):
 
     project_name = request.query.get("project", "")
     auto_claude = request.query.get("claude", "0") == "1"
+    continue_claude = request.query.get("continue", "0") == "1"
+    resume_id = request.query.get("resume", "")
     project_path = os.path.join(PROJECTS_DIR, project_name)
-    session_type = "claude" if auto_claude else "shell"
+    session_type = "claude" if (auto_claude or continue_claude or resume_id) else "shell"
     session_key = f"{project_name}:{session_type}"
 
     if not project_name or not os.path.isdir(project_path):
@@ -1121,9 +1553,14 @@ async def ws_handler(request):
         log.info(f"New PTY: {session_key} — {request.remote}")
         await ws_resp.send_json({"type": "status", "data": f"new {session_type} PTY started"})
 
-        if auto_claude:
+        if auto_claude or continue_claude or resume_id:
+            cmd = CLAUDE_CMD
+            if continue_claude:
+                cmd += " --continue"
+            elif resume_id:
+                cmd += " --resume " + resume_id
             await asyncio.sleep(0.5)
-            term.write(CLAUDE_CMD + "\r")
+            term.write(cmd + "\r")
 
     # Subscribe
     entry["subscribers"].add(ws_resp)
@@ -1166,6 +1603,10 @@ def main():
     app = web.Application()
     app.router.add_get("/", index)
     app.router.add_get("/api/projects", api_projects)
+    app.router.add_post("/api/kill", api_kill)
+    app.router.add_get("/api/sessions", api_sessions)
+    app.router.add_post("/api/new-project", api_new_project)
+    app.router.add_get("/api/claude-logo", claude_logo)
     app.router.add_get("/ws", ws_handler)
     app.router.add_post("/upload", upload_handler)
 

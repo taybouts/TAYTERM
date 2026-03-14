@@ -205,22 +205,24 @@ LOG_HTML = '''<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <style>
-  :root { --bg: #0a0a14; --surface: #12121f; --border: #222240; --text: #c0c8d8; --text2: #6a7388; --accent: #00b894; --accent2: #55efc4; --red: #e17055; }
+  :root { --bg: #000; --surface: #050505; --border: #003300; --green: #00ff41; --green-dim: #00cc33; --green-dark: #003300; --red: #ff0040; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; overflow: hidden; }
-  body { font-family: 'Consolas', 'Courier New', monospace; background: var(--bg); color: var(--text); display: flex; flex-direction: column; }
+  body { font-family: 'Consolas', 'Courier New', monospace; background: var(--bg); color: var(--green-dim); display: flex; flex-direction: column; }
   .top-bar { display: flex; align-items: center; background: var(--surface); border-bottom: 1px solid var(--border); padding: 6px 12px; flex-shrink: 0; }
-  .title { font-size: 12px; font-weight: 700; color: var(--accent2); letter-spacing: 1px; }
+  .title { font-size: 12px; font-weight: 700; color: var(--green); letter-spacing: 2px; text-transform: uppercase; }
   .top-right { margin-left: auto; display: flex; gap: 6px; }
-  .btn { padding: 3px 10px; font-size: 10px; font-weight: 600; border: 1px solid var(--border); border-radius: 4px; cursor: pointer; background: transparent; color: var(--text2); transition: all 0.12s; font-family: 'Segoe UI', sans-serif; }
-  .btn:hover { border-color: var(--accent); color: var(--accent2); }
-  .btn-red { border-color: var(--red); color: var(--red); }
-  .btn-red:hover { background: var(--red); color: #fff; }
-  .btn-green { border-color: var(--accent); color: var(--accent); }
-  .btn-green:hover { background: var(--accent); color: #fff; }
-  .log-area { flex: 1; padding: 8px 12px; overflow-y: auto; font-size: 11px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; color: #909ab0; }
+  .btn { padding: 3px 10px; font-size: 10px; font-weight: 600; border: 1px solid var(--border); cursor: pointer; background: transparent; color: var(--green-dark); font-family: inherit; letter-spacing: 1px; }
+  .btn:hover { border-color: var(--green); color: var(--green); }
+  .btn-red { border-color: #330010; color: var(--red); }
+  .btn-red:hover { background: var(--red); color: #000; }
+  .btn-green { border-color: var(--green-dark); color: var(--green); }
+  .btn-green:hover { background: var(--green); color: #000; }
+  .log-area { flex: 1; padding: 8px 12px; overflow-y: auto; font-size: 11px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; color: var(--green-dim); }
   .log-area::-webkit-scrollbar { width: 6px; }
-  .log-area::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .log-area::-webkit-scrollbar-track { background: #000; }
+  .log-area::-webkit-scrollbar-thumb { background: var(--green-dark); }
+  .log-area::-webkit-scrollbar-thumb:hover { background: var(--green-dim); }
 </style>
 </head>
 <body>
