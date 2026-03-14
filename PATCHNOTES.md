@@ -1,5 +1,20 @@
 # TAYTERM Patch Notes
 
+## v0.3.1 — Tab & Button Polish
+_Released: 2026-03-14_
+
+### Improvements
+- **Tab text no longer bold** — font-weight reduced from 600 to 400 for a cleaner look
+- **Thinner active tab indicator** — border-bottom reduced from 2px to 1px
+- **Wider tabs** — min-width 140px with increased padding (32px) for more spacious feel
+- **Larger tab text** — font size bumped from 11px to 13px
+- **Centered tab text** — tab content is now truly centered with close button as an absolute overlay
+- **Hover-only close button** — tab close button hidden by default, appears on hover as a 22x22 boxed icon with rounded corners
+- **Green close button** — hover turns the close button green (was red) to match Matrix theme
+- **Larger scroll-to-bottom button** — increased from 28x28 to 35x35 with larger arrow icon (18px)
+
+---
+
 ## v0.3.0 — Session Management & UI Overhaul
 _Released: 2026-03-14_
 

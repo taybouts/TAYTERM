@@ -211,11 +211,11 @@ HTML = '''<!DOCTYPE html>
   /* ── Scroll-to-bottom button ── */
   .scroll-to-bottom {
     position: absolute; bottom: 12px; right: 16px; z-index: 12;
-    width: 28px; height: 28px; border-radius: 50%;
+    width: 35px; height: 35px; border-radius: 50%;
     background: rgba(0,204,51,0.15); border: 1px solid rgba(0,204,51,0.4);
     color: var(--green-dim); cursor: pointer;
     display: none; align-items: center; justify-content: center;
-    font-size: 14px; line-height: 1; transition: opacity 0.2s, background 0.2s;
+    font-size: 18px; line-height: 1; transition: opacity 0.2s, background 0.2s;
   }
   .scroll-to-bottom:hover { background: rgba(0,204,51,0.3); color: var(--green); }
   .scroll-to-bottom.visible { display: flex; }
@@ -339,26 +339,30 @@ HTML = '''<!DOCTYPE html>
   }
   #tab-strip::-webkit-scrollbar { display: none; }
   .tab {
-    display: flex; align-items: center; gap: 6px; padding: 0 12px; cursor: pointer;
-    border-right: 1px solid var(--border); font-size: 11px; color: var(--text2);
-    white-space: nowrap; flex-shrink: 0; transition: all 0.1s;
+    display: flex; align-items: center; justify-content: center; gap: 6px; padding: 0 32px; cursor: pointer;
+    border-right: 1px solid var(--border); font-size: 13px; color: var(--text2);
+    white-space: nowrap; flex-shrink: 0; transition: all 0.1s; position: relative; min-width: 140px;
   }
   .tab:hover { background: rgba(0,255,65,0.05); color: var(--green-dim); }
   .tab.active {
     background: rgba(0,255,65,0.05); color: var(--green);
-    border-bottom: 2px solid var(--green);
+    border-bottom: 1px solid var(--green);
     text-shadow: 0 0 5px var(--green-glow);
   }
-  .tab .tab-name { font-weight: 600; }
+  .tab .tab-name { font-weight: 400; }
   .tab .tab-shell {
     font-size: 9px; color: #000; background: var(--cyan); padding: 1px 4px;
     letter-spacing: 1px; font-weight: 700;
   }
   .tab .tab-close {
-    font-size: 14px; color: var(--text2); cursor: pointer; margin-left: 4px;
-    line-height: 1; padding: 0 2px;
+    position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+    width: 22px; height: 22px; display: flex; align-items: center; justify-content: center;
+    font-size: 16px; color: #fff; cursor: pointer; border-radius: 3px;
+    background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.15);
+    line-height: 1; opacity: 0; transition: all 0.15s;
   }
-  .tab .tab-close:hover { color: var(--red); text-shadow: 0 0 5px var(--red-glow); }
+  .tab:hover .tab-close { opacity: 1; }
+  .tab .tab-close:hover { background: var(--green); border-color: var(--green); color: #000; text-shadow: 0 0 5px var(--green-glow); }
   #layout-btns {
     display: flex; gap: 2px; padding: 0 8px; align-items: center; height: 100%;
     border-left: 1px solid var(--border);
