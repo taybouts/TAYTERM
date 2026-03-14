@@ -197,6 +197,32 @@ HTML = '''<!DOCTYPE html>
   ::-webkit-scrollbar-thumb { background: rgba(0,204,51,0.5); border-radius: 4px; }
   ::-webkit-scrollbar-thumb:hover { background: rgba(0,255,65,0.6); }
   ::-webkit-scrollbar-button { display: none; }
+
+  /* ── Hide native scrollbar on xterm viewport (v6 custom scrollbar replaces it) ── */
+  .xterm .xterm-viewport { scrollbar-width: none !important; }
+  .xterm .xterm-viewport::-webkit-scrollbar { display: none !important; }
+
+  /* ── xterm.js v6 scrollbar: thin green pill in 10px right gutter ── */
+  .xterm-decoration-overview-ruler { display: none !important; }
+  .xterm .xterm-scrollable-element > .scrollbar { width: 8px !important; right: 1px !important; }
+  .xterm .xterm-scrollable-element > .scrollbar > .slider { width: 8px !important; border-radius: 9999px; left: 0 !important; }
+  .xterm .xterm-scrollable-element > .shadow { display: none !important; }
+
+  /* ── Scroll-to-bottom button ── */
+  .scroll-to-bottom {
+    position: absolute; bottom: 12px; right: 16px; z-index: 12;
+    width: 28px; height: 28px; border-radius: 50%;
+    background: rgba(0,204,51,0.15); border: 1px solid rgba(0,204,51,0.4);
+    color: var(--green-dim); cursor: pointer;
+    display: none; align-items: center; justify-content: center;
+    font-size: 14px; line-height: 1; transition: opacity 0.2s, background 0.2s;
+  }
+  .scroll-to-bottom:hover { background: rgba(0,204,51,0.3); color: var(--green); }
+  .scroll-to-bottom.visible { display: flex; }
+
+  /* ── Terminal left padding (right 10px handled by overviewRuler width) ── */
+  .pane { padding: 0 0 0 10px !important; }
+
   html, body {
     height: 100%; background: var(--bg); color: var(--text);
     font-family: 'Share Tech Mono', 'Courier New', monospace; overflow: hidden;
@@ -339,7 +365,8 @@ HTML = '''<!DOCTYPE html>
   }
   .layout-btn {
     background: none; border: 1px solid var(--border); color: var(--text2);
-    padding: 2px 6px; cursor: pointer; font-size: 10px; font-family: inherit;
+    padding: 4px 6px; cursor: pointer; font-size: 10px; font-family: inherit;
+    display: flex; align-items: center; justify-content: center;
   }
   .layout-btn:hover { border-color: var(--green-dim); color: var(--green-dim); }
   .layout-btn.active { border-color: var(--green); color: var(--green); text-shadow: 0 0 5px var(--green-glow); }
@@ -554,10 +581,10 @@ HTML = '''<!DOCTYPE html>
     <button id="back-btn" onclick="showPicker()">&#9664;</button>
     <div id="tab-strip"></div>
     <div id="layout-btns">
-      <button class="layout-btn active" data-layout="single" onclick="setLayout('single')">&#9632;</button>
-      <button class="layout-btn" data-layout="hsplit" onclick="setLayout('hsplit')">&#9646;&#9646;</button>
-      <button class="layout-btn" data-layout="vsplit" onclick="setLayout('vsplit')">&#9620;&#9620;</button>
-      <button class="layout-btn" data-layout="quad" onclick="setLayout('quad')">&#9638;</button>
+      <button class="layout-btn active" data-layout="single" onclick="setLayout('single')"><svg width="14" height="12" viewBox="0 0 14 12"><rect x="1" y="1" width="12" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></button>
+      <button class="layout-btn" data-layout="hsplit" onclick="setLayout('hsplit')"><svg width="14" height="12" viewBox="0 0 14 12"><rect x="1" y="1" width="5" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="8" y="1" width="5" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></button>
+      <button class="layout-btn" data-layout="vsplit" onclick="setLayout('vsplit')"><svg width="14" height="12" viewBox="0 0 14 12"><rect x="1" y="1" width="12" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="1" y="7" width="12" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></button>
+      <button class="layout-btn" data-layout="quad" onclick="setLayout('quad')"><svg width="14" height="12" viewBox="0 0 14 12"><rect x="1" y="1" width="5" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="8" y="1" width="5" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="1" y="7" width="5" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="8" y="7" width="5" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></button>
       <button id="fullscreen-btn" onclick="toggleFullscreen()" title="Fullscreen">&#x26F6;</button>
     </div>
   </div>
@@ -891,12 +918,29 @@ function openSession(name, isShell, continueFlag, resumeId) {
     scrollback: 5000,
     fontSize: 17,
     fontFamily: 'courier-new, courier, monospace',
-    theme: { background: '#000' },
+    overviewRuler: { width: 10 },
+    theme: {
+      background: '#000',
+      scrollbarSliderBackground: 'rgba(0,204,51,0.4)',
+      scrollbarSliderHoverBackground: 'rgba(0,255,65,0.55)',
+      scrollbarSliderActiveBackground: 'rgba(0,255,65,0.7)',
+    },
   });
   const fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
   term.open(container);
   try { term.loadAddon(new WebglAddon.WebglAddon()); } catch(e) {}
+
+  // Scroll-to-bottom button
+  const scrollBtn = document.createElement('div');
+  scrollBtn.className = 'scroll-to-bottom';
+  scrollBtn.innerHTML = '&#x25BC;';
+  container.appendChild(scrollBtn);
+  scrollBtn.addEventListener('click', () => term.scrollToBottom());
+  term.onScroll(() => {
+    const atBottom = term.buffer.active.viewportY >= term.buffer.active.baseY;
+    scrollBtn.classList.toggle('visible', !atBottom);
+  });
 
   // Connect WebSocket
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
