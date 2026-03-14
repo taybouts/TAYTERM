@@ -170,6 +170,7 @@ HTML = '''<!DOCTYPE html>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.min.css">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@300;400;500&display=swap" rel="stylesheet">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -344,6 +345,8 @@ HTML = '''<!DOCTYPE html>
     white-space: nowrap; flex-shrink: 0; transition: all 0.1s; position: relative; min-width: 140px;
   }
   .tab:hover { background: rgba(0,255,65,0.05); color: var(--green-dim); }
+  .tab.tab-add { min-width: auto; padding: 0 14px; font-size: 18px; color: var(--green-dark); border-right: none; }
+  .tab.tab-add:hover { color: var(--green); }
   .tab.active {
     background: rgba(0,255,65,0.05); color: var(--green);
     border-bottom: 1px solid var(--green);
@@ -706,6 +709,12 @@ async function loadProjects() {
   const projects = await resp.json();
   const grid = document.getElementById('project-grid');
   grid.innerHTML = '';
+  projects.sort((a, b) => {
+    if (a.live !== b.live) return a.live ? -1 : 1;
+    if (a.git !== b.git) return a.git ? -1 : 1;
+    if (a.can_continue !== b.can_continue) return a.can_continue ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
   for (const p of projects) {
     const card = document.createElement('div');
     card.className = 'project-card' + (p.live ? ' live' : '');
@@ -921,10 +930,30 @@ function openSession(name, isShell, continueFlag, resumeId) {
     cursorBlink: true,
     scrollback: 5000,
     fontSize: 17,
-    fontFamily: 'courier-new, courier, monospace',
+    fontFamily: '"Fira Code", monospace',
+    fontWeight: '300',
+    fontWeightBold: '500',
+    drawBoldTextInBrightColors: true,
     overviewRuler: { width: 10 },
     theme: {
       background: '#000',
+      foreground: '#ececec',
+      black: '#000000',
+      red: '#ff0000',
+      green: '#00ff00',
+      yellow: '#ffff00',
+      blue: '#5c5cff',
+      magenta: '#ff00ff',
+      cyan: '#00ffff',
+      white: '#ffffff',
+      brightBlack: '#808080',
+      brightRed: '#ff0000',
+      brightGreen: '#00ff00',
+      brightYellow: '#ffff00',
+      brightBlue: '#5c5cff',
+      brightMagenta: '#ff00ff',
+      brightCyan: '#00ffff',
+      brightWhite: '#ffffff',
       scrollbarSliderBackground: 'rgba(0,204,51,0.4)',
       scrollbarSliderHoverBackground: 'rgba(0,255,65,0.55)',
       scrollbarSliderActiveBackground: 'rgba(0,255,65,0.7)',
@@ -1085,6 +1114,11 @@ function renderTabs() {
     tab.onclick = () => switchTab(id);
     strip.appendChild(tab);
   }
+  const addBtn = document.createElement('div');
+  addBtn.className = 'tab tab-add';
+  addBtn.innerHTML = '+';
+  addBtn.onclick = () => showPicker();
+  strip.appendChild(addBtn);
 }
 
 function switchTab(id) {

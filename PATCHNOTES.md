@@ -1,5 +1,25 @@
 # TAYTERM Patch Notes
 
+## v0.3.2 — Fira Code, VGA Colors & New Tab Button
+_Released: 2026-03-15_
+
+### New Features
+- **Fira Code terminal font** — replaced Courier New with Fira Code (loaded from Google Fonts CDN), lighter weight (300) with semi-bold (500) for emphasis
+- **VGA color palette** — bright, vivid ANSI colors replacing the dark Tango defaults
+- **"+" tab button** — add new sessions directly from the tab strip, opens project picker
+- **Smart project sorting** — LIVE projects first, then GIT repos, then projects with conversations, then alphabetical
+
+### Improvements
+- **Brighter foreground text** — `#ececec` for better readability on black background
+- **Bold text emphasis** — `drawBoldTextInBrightColors` enabled with weight 500 for visible but subtle emphasis
+- **Lighter base font weight** — Fira Code at 300 for clean, thin text rendering
+
+### Architecture
+- Terminal theme now uses explicit VGA color palette instead of xterm.js Tango defaults
+- Project list sorted client-side with priority: live > git > conversations > alphabetical
+
+---
+
 ## v0.3.1 — Tab & Button Polish
 _Released: 2026-03-14_
 
