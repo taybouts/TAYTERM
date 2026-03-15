@@ -269,10 +269,24 @@ HTML = '''<!DOCTYPE html>
     border-color: var(--green);
     box-shadow: 0 0 8px var(--green-glow);
   }
+  .project-name-row { display: flex; align-items: center; margin-bottom: 6px; }
   .project-name {
-    font-size: 12px; font-weight: 600; margin-bottom: 6px; color: var(--accent);
-    letter-spacing: 1px;
+    font-size: 12px; font-weight: 600; color: var(--accent);
+    letter-spacing: 1px; flex: 1;
   }
+  .pin-icon {
+    font-size: 12px; color: var(--text2); cursor: pointer; padding: 0 2px;
+    transition: all 0.15s; opacity: 0.4;
+  }
+  .project-card:hover .pin-icon { opacity: 0.8; }
+  .pin-icon:hover { color: var(--green); opacity: 1 !important; }
+  .pin-icon.pinned { color: var(--green); opacity: 0.8; }
+  .pin-controls { display: flex; align-items: center; gap: 2px; }
+  .pin-arrow {
+    font-size: 14px; color: var(--text2); cursor: pointer; padding: 0 2px;
+    line-height: 1; transition: color 0.15s;
+  }
+  .pin-arrow:hover { color: var(--green); }
   .project-badges { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 6px; min-height: 18px; }
   .project-actions { display: flex; flex-direction: column; gap: 4px; margin-top: 2px; }
   .project-actions button {
@@ -357,6 +371,27 @@ HTML = '''<!DOCTYPE html>
     font-size: 9px; color: #000; background: var(--cyan); padding: 1px 4px;
     letter-spacing: 1px; font-weight: 700;
   }
+  .tab .tab-mute {
+    position: absolute; left: 6px; top: 50%; transform: translateY(-50%);
+    width: 22px; height: 22px; display: flex; align-items: center; justify-content: center;
+    cursor: pointer; border-radius: 3px;
+    background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.15);
+    opacity: 0; transition: all 0.15s;
+  }
+  .tab:hover .tab-mute { opacity: 1; }
+  .tab .tab-mute.muted { opacity: 1; background: rgba(255,0,64,0.2); border-color: rgba(255,0,64,0.4); }
+  .tab .tab-mute.muted svg { stroke: var(--red); }
+  .tab .tab-mute:hover { background: var(--green); border-color: var(--green); }
+  .tab .tab-mute:hover svg { stroke: #000; }
+  .tab .tab-mute svg { width: 12px; height: 12px; stroke: #fff; stroke-width: 2; fill: none; }
+  .tab .tab-mute.speaking { opacity: 1; }
+  .tab.speaking {
+    animation: tab-speak 2s ease-in-out infinite;
+  }
+  @keyframes tab-speak {
+    0%, 100% { background: rgba(0,255,65,0.03); }
+    50% { background: rgba(0,255,65,0.08); }
+  }
   .tab .tab-close {
     position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
     width: 22px; height: 22px; display: flex; align-items: center; justify-content: center;
@@ -411,6 +446,45 @@ HTML = '''<!DOCTYPE html>
     text-transform: uppercase; letter-spacing: 4px;
   }
   #drop-overlay.active { display: flex; }
+
+  /* ── Screenshot / Snip ── */
+  #screenshot-dropdown {
+    position: absolute; top: 100%; right: 0; min-width: 150px;
+    background: #0a0a0a; border: 1px solid var(--green-dark); z-index: 200;
+    display: none; flex-direction: column;
+  }
+  #screenshot-dropdown.open { display: flex; }
+  #screenshot-dropdown button {
+    background: none; border: none; color: var(--green-dim); font: inherit;
+    font-size: 11px; letter-spacing: 1px; text-transform: uppercase;
+    padding: 8px 14px; text-align: left; cursor: pointer;
+  }
+  #screenshot-dropdown button:hover { background: var(--green-dark); color: var(--green); }
+  #screenshot-wrap { position: relative; }
+
+  #snip-overlay {
+    display: none; position: fixed; inset: 0; z-index: 300; cursor: crosshair;
+  }
+  #snip-overlay.active { display: block; }
+  #snip-overlay canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #snip-sel {
+    position: absolute; border: 2px solid var(--green);
+    background: rgba(0,255,65,0.1); pointer-events: none; display: none;
+  }
+
+  .attach-preview {
+    position: absolute; bottom: 8px; left: 8px; z-index: 10;
+    border: 2px solid var(--green); background: #000; padding: 2px;
+    cursor: default; max-width: 84px; max-height: 64px;
+  }
+  .attach-preview img { display: block; max-width: 80px; max-height: 60px; }
+  .attach-preview .attach-x {
+    position: absolute; top: -8px; right: -8px; width: 16px; height: 16px;
+    background: #000; border: 1px solid var(--green); color: var(--green);
+    font-size: 10px; line-height: 14px; text-align: center; cursor: pointer;
+    display: none; border-radius: 50%;
+  }
+  .attach-preview:hover .attach-x { display: block; }
 
   /* ── Loading Overlay ── */
   .loading-overlay {
@@ -592,6 +666,14 @@ HTML = '''<!DOCTYPE html>
       <button class="layout-btn" data-layout="hsplit" onclick="setLayout('hsplit')"><svg width="14" height="12" viewBox="0 0 14 12"><rect x="1" y="1" width="5" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="8" y="1" width="5" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></button>
       <button class="layout-btn" data-layout="vsplit" onclick="setLayout('vsplit')"><svg width="14" height="12" viewBox="0 0 14 12"><rect x="1" y="1" width="12" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="1" y="7" width="12" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></button>
       <button class="layout-btn" data-layout="quad" onclick="setLayout('quad')"><svg width="14" height="12" viewBox="0 0 14 12"><rect x="1" y="1" width="5" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="8" y="1" width="5" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="1" y="7" width="5" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="8" y="7" width="5" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></button>
+      <span id="screenshot-wrap">
+        <button class="layout-btn" onclick="toggleScreenshotMenu(event)" title="Screenshot"><svg width="14" height="12" viewBox="0 0 14 12"><rect x="1" y="2" width="12" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="7" cy="7" r="2.5" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="4" y="1" width="3" height="2" rx="0.5" fill="currentColor"/></svg></button>
+        <div id="screenshot-dropdown">
+          <button onclick="doScreenshot('snip')">Snip Region</button>
+          <button onclick="doScreenshot('window')">Window</button>
+          <button onclick="doScreenshot('screen')">Screen</button>
+        </div>
+      </span>
       <button id="fullscreen-btn" onclick="toggleFullscreen()" title="Fullscreen">&#x26F6;</button>
     </div>
   </div>
@@ -599,6 +681,7 @@ HTML = '''<!DOCTYPE html>
 </div>
 
 <div id="drop-overlay">DROP FILE</div>
+<div id="snip-overlay"><canvas id="snip-canvas"></canvas><div id="snip-sel"></div></div>
 
 <!-- Confirm Modal -->
 <div id="confirm-modal" onclick="if(event.target===this)closeConfirm()">
@@ -690,7 +773,7 @@ let selectedPane = 0;  // which pane is selected for tab assignment
 //  Session persistence (localStorage)
 // ══════════════════════════════════════════
 function saveState() {
-  const tabs = Object.values(sessions).map(s => ({ name: s.name, isShell: s.isShell }));
+  const tabs = Object.values(sessions).map(s => ({ name: s.name, isShell: s.isShell, muted: s.muted || false }));
   const active = activeSessionId ? sessions[activeSessionId]?.name : null;
   localStorage.setItem('tayterm_tabs', JSON.stringify({ tabs, active, layout }));
 }
@@ -704,55 +787,116 @@ function loadState() {
 // ══════════════════════════════════════════
 //  Project Picker
 // ══════════════════════════════════════════
+function getPinnedProjects() {
+  try { return JSON.parse(localStorage.getItem('tayterm_pinned')) || []; } catch(e) { return []; }
+}
+function savePinnedProjects(list) {
+  localStorage.setItem('tayterm_pinned', JSON.stringify(list));
+}
+function pinProject(name) {
+  const pinned = getPinnedProjects();
+  if (!pinned.includes(name)) pinned.push(name);
+  savePinnedProjects(pinned);
+  loadProjects();
+}
+function unpinProject(name) {
+  savePinnedProjects(getPinnedProjects().filter(n => n !== name));
+  loadProjects();
+}
+function movePinned(name, dir) {
+  const pinned = getPinnedProjects();
+  const i = pinned.indexOf(name);
+  if (i < 0) return;
+  const j = i + dir;
+  if (j < 0 || j >= pinned.length) return;
+  [pinned[i], pinned[j]] = [pinned[j], pinned[i]];
+  savePinnedProjects(pinned);
+  loadProjects();
+}
+
+function buildCard(p, isPinned, pinIdx, pinCount) {
+  const card = document.createElement('div');
+  card.className = 'project-card' + (p.live ? ' live' : '');
+  let badges = '';
+  if (p.live) badges += '<span class="badge badge-live">LIVE</span>';
+  if (p.subscribers > 0) badges += '<span class="badge badge-subs">' + p.subscribers + '</span>';
+  if (p.claude) badges += '<span class="badge badge-claude">CLAUDE</span>';
+  if (p.git) badges += '<span class="badge badge-git">GIT</span>';
+
+  // Pin controls in project-name row
+  let pinHtml = '';
+  if (isPinned) {
+    const leftDisabled = pinIdx === 0 ? ' style="opacity:0.2;pointer-events:none"' : '';
+    const rightDisabled = pinIdx === pinCount - 1 ? ' style="opacity:0.2;pointer-events:none"' : '';
+    pinHtml =
+      '<span class="pin-controls">' +
+        '<span class="pin-arrow"' + leftDisabled + ' onclick="event.stopPropagation(); movePinned(\\'' + p.name + '\\', -1)">&lsaquo;</span>' +
+        '<span class="pin-icon pinned" onclick="event.stopPropagation(); unpinProject(\\'' + p.name + '\\')" title="Unpin">&#9733;</span>' +
+        '<span class="pin-arrow"' + rightDisabled + ' onclick="event.stopPropagation(); movePinned(\\'' + p.name + '\\', 1)">&rsaquo;</span>' +
+      '</span>';
+  } else {
+    pinHtml = '<span class="pin-icon" onclick="event.stopPropagation(); pinProject(\\'' + p.name + '\\')" title="Pin">&#9734;</span>';
+  }
+
+  let actionsHtml = '';
+  if (p.claude_live) {
+    actionsHtml =
+      '<button class="btn-primary" onclick="event.stopPropagation(); openSession(\\'' + p.name + '\\', false)">Claude</button>' +
+      '<div class="actions-row">' +
+        '<button class="btn-shell" onclick="event.stopPropagation(); openSession(\\'' + p.name + '\\', true)">Shell</button>' +
+        '<button class="btn-kill" onclick="event.stopPropagation(); killProject(\\'' + p.name + '\\')">Kill</button>' +
+      '</div>';
+  } else if (p.can_continue) {
+    actionsHtml =
+      '<button class="btn-primary" onclick="event.stopPropagation(); continueSession(\\'' + p.name + '\\')">Continue</button>' +
+      '<div class="actions-row">' +
+        '<button class="btn-dim" onclick="event.stopPropagation(); confirmNewSession(\\'' + p.name + '\\')">New</button>' +
+        '<button class="btn-dim" onclick="event.stopPropagation(); resumeSession(\\'' + p.name + '\\')">Resume (' + p.conv_count + ')</button>' +
+        '<button class="btn-shell" onclick="event.stopPropagation(); openSession(\\'' + p.name + '\\', true)">Shell</button>' +
+      '</div>';
+  } else {
+    actionsHtml =
+      '<button class="btn-primary" onclick="event.stopPropagation(); openSession(\\'' + p.name + '\\', false)">Claude</button>' +
+      '<div class="actions-row">' +
+        '<button class="btn-shell" onclick="event.stopPropagation(); openSession(\\'' + p.name + '\\', true)">Shell</button>' +
+      '</div>';
+  }
+  card.innerHTML =
+    '<div class="project-name-row">' +
+      '<div class="project-name">' + p.name + '</div>' +
+      pinHtml +
+    '</div>' +
+    '<div class="project-badges">' + badges + '</div>' +
+    '<div class="project-actions">' + actionsHtml + '</div>' +
+    (p.desc ? '<div class="project-desc">' + p.desc + '</div>' : '<div class="project-desc">&nbsp;</div>');
+  card.onclick = () => p.can_continue ? continueSession(p.name) : openSession(p.name, false);
+  return card;
+}
+
 async function loadProjects() {
   const resp = await fetch('/api/projects');
   const projects = await resp.json();
   const grid = document.getElementById('project-grid');
   grid.innerHTML = '';
-  projects.sort((a, b) => {
+  const pinned = getPinnedProjects();
+  const pinnedSet = new Set(pinned);
+
+  // Pinned projects first, in saved order
+  for (let i = 0; i < pinned.length; i++) {
+    const p = projects.find(pr => pr.name === pinned[i]);
+    if (p) grid.appendChild(buildCard(p, true, i, pinned.length));
+  }
+
+  // Unpinned projects, sorted
+  const unpinned = projects.filter(p => !pinnedSet.has(p.name));
+  unpinned.sort((a, b) => {
     if (a.live !== b.live) return a.live ? -1 : 1;
     if (a.git !== b.git) return a.git ? -1 : 1;
     if (a.can_continue !== b.can_continue) return a.can_continue ? -1 : 1;
     return a.name.localeCompare(b.name);
   });
-  for (const p of projects) {
-    const card = document.createElement('div');
-    card.className = 'project-card' + (p.live ? ' live' : '');
-    let badges = '';
-    if (p.live) badges += '<span class="badge badge-live">LIVE</span>';
-    if (p.subscribers > 0) badges += '<span class="badge badge-subs">' + p.subscribers + '</span>';
-    if (p.claude) badges += '<span class="badge badge-claude">CLAUDE</span>';
-    if (p.git) badges += '<span class="badge badge-git">GIT</span>';
-    let actionsHtml = '';
-    if (p.claude_live) {
-      actionsHtml =
-        '<button class="btn-primary" onclick="event.stopPropagation(); openSession(\\'' + p.name + '\\', false)">Claude</button>' +
-        '<div class="actions-row">' +
-          '<button class="btn-shell" onclick="event.stopPropagation(); openSession(\\'' + p.name + '\\', true)">Shell</button>' +
-          '<button class="btn-kill" onclick="event.stopPropagation(); killProject(\\'' + p.name + '\\')">Kill</button>' +
-        '</div>';
-    } else if (p.can_continue) {
-      actionsHtml =
-        '<button class="btn-primary" onclick="event.stopPropagation(); continueSession(\\'' + p.name + '\\')">Continue</button>' +
-        '<div class="actions-row">' +
-          '<button class="btn-dim" onclick="event.stopPropagation(); confirmNewSession(\\'' + p.name + '\\')">New</button>' +
-          '<button class="btn-dim" onclick="event.stopPropagation(); resumeSession(\\'' + p.name + '\\')">Resume (' + p.conv_count + ')</button>' +
-          '<button class="btn-shell" onclick="event.stopPropagation(); openSession(\\'' + p.name + '\\', true)">Shell</button>' +
-        '</div>';
-    } else {
-      actionsHtml =
-        '<button class="btn-primary" onclick="event.stopPropagation(); openSession(\\'' + p.name + '\\', false)">Claude</button>' +
-        '<div class="actions-row">' +
-          '<button class="btn-shell" onclick="event.stopPropagation(); openSession(\\'' + p.name + '\\', true)">Shell</button>' +
-        '</div>';
-    }
-    card.innerHTML =
-      '<div class="project-name">' + p.name + '</div>' +
-      '<div class="project-badges">' + badges + '</div>' +
-      '<div class="project-actions">' + actionsHtml + '</div>' +
-      (p.desc ? '<div class="project-desc">' + p.desc + '</div>' : '<div class="project-desc">&nbsp;</div>');
-    card.onclick = () => p.can_continue ? continueSession(p.name) : openSession(p.name, false);
-    grid.appendChild(card);
+  for (const p of unpinned) {
+    grid.appendChild(buildCard(p, false, -1, 0));
   }
 }
 
@@ -990,7 +1134,7 @@ function openSession(name, isShell, continueFlag, resumeId) {
     }
   }
 
-  const session = { name, term, ws, fitAddon, container, isShell };
+  const session = { name, term, ws, fitAddon, container, isShell, muted: false };
   sessions[id] = session;
 
   ws.onopen = () => {
@@ -1016,6 +1160,13 @@ function openSession(name, isShell, continueFlag, resumeId) {
 
   term.onData(data => {
     if (ws.readyState === WebSocket.OPEN) {
+      if (data === '\r' && pendingAttachments[id]) {
+        const att = pendingAttachments[id];
+        ws.send(JSON.stringify({ type: 'input', data: ' ' + att.path }));
+        ws.send(JSON.stringify({ type: 'input', data: '\r' }));
+        clearAttachment(id);
+        return;
+      }
       ws.send(JSON.stringify({ type: 'input', data }));
     }
   });
@@ -1030,6 +1181,16 @@ function openSession(name, isShell, continueFlag, resumeId) {
   term.attachCustomKeyEventHandler((e) => {
     if (e.type !== 'keydown') return true;
     const key = e.key.toLowerCase();
+    if (e.shiftKey && key === 'enter') {
+      if (ws.readyState === WebSocket.OPEN)
+        ws.send(JSON.stringify({ type: 'input', data: '\\n' }));
+      return false;
+    }
+    if (e.ctrlKey && e.shiftKey && key === 's') {
+      e.preventDefault();
+      doScreenshot('snip');
+      return false;
+    }
     if (e.ctrlKey && key === 'c') {
       const sel = term.getSelection();
       if (sel) {
@@ -1049,7 +1210,7 @@ function openSession(name, isShell, continueFlag, resumeId) {
             handled = true;
             const blob = await item.getType(imageType);
             const ext = imageType.split('/')[1] || 'png';
-            uploadFile(new File([blob], 'paste_' + Date.now() + '.' + ext, { type: imageType }));
+            uploadScreenshot(new File([blob], 'paste_' + Date.now() + '.' + ext, { type: imageType }));
           }
         }
         if (!handled) {
@@ -1104,10 +1265,13 @@ function closeSession(id) {
 function renderTabs() {
   const strip = document.getElementById('tab-strip');
   strip.innerHTML = '';
+  const muteIcon = '<svg viewBox="0 0 24 24"><polygon points="11,5 6,9 2,9 2,15 6,15 11,19"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>';
+  const speakerIcon = '<svg viewBox="0 0 24 24"><polygon points="11,5 6,9 2,9 2,15 6,15 11,19"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>';
   for (const [id, s] of Object.entries(sessions)) {
     const tab = document.createElement('div');
     tab.className = 'tab' + (id === activeSessionId ? ' active' : '');
     tab.innerHTML =
+      '<span class="tab-mute' + (s.muted ? ' muted' : '') + '" onclick="event.stopPropagation(); toggleMute(\\'' + id + '\\')">' + (s.muted ? muteIcon : speakerIcon) + '</span>' +
       '<span class="tab-name">' + s.name + '</span>' +
       (s.isShell ? '<span class="tab-shell">SHELL</span>' : '') +
       '<span class="tab-close" onclick="event.stopPropagation(); closeSession(\\'' + id + '\\')">&times;</span>';
@@ -1119,6 +1283,19 @@ function renderTabs() {
   addBtn.innerHTML = '+';
   addBtn.onclick = () => showPicker();
   strip.appendChild(addBtn);
+}
+
+function toggleMute(id) {
+  if (!sessions[id]) return;
+  const s = sessions[id];
+  s.muted = !s.muted;
+  fetch('http://127.0.0.1:7123/tts-state', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({project: s.name, state: s.muted ? 'muted' : 'default'})
+  }).catch(() => {});
+  renderTabs();
+  saveState();
 }
 
 function switchTab(id) {
@@ -1271,6 +1448,154 @@ async function uploadFile(file) {
   } catch(err) { console.error('Upload failed:', err); }
 }
 
+// ══════════════════════════════════════════
+//  Screenshot & Attachments
+// ══════════════════════════════════════════
+const pendingAttachments = {};  // { sessionId: { path, blobUrl } }
+
+function toggleScreenshotMenu(e) {
+  e.stopPropagation();
+  const dd = document.getElementById('screenshot-dropdown');
+  dd.classList.toggle('open');
+  const close = (ev) => { if (!dd.contains(ev.target)) { dd.classList.remove('open'); document.removeEventListener('click', close); } };
+  if (dd.classList.contains('open')) setTimeout(() => document.addEventListener('click', close), 0);
+}
+
+async function doScreenshot(mode) {
+  document.getElementById('screenshot-dropdown').classList.remove('open');
+  try {
+    const surface = mode === 'window' ? 'window' : 'monitor';
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { displaySurface: surface }, preferCurrentTab: false
+    });
+    const track = stream.getVideoTracks()[0];
+    const video = document.createElement('video');
+    video.srcObject = stream;
+    video.muted = true;
+    await video.play();
+    // Wait a frame for video to render
+    await new Promise(r => requestAnimationFrame(r));
+    const cvs = document.createElement('canvas');
+    cvs.width = video.videoWidth;
+    cvs.height = video.videoHeight;
+    cvs.getContext('2d').drawImage(video, 0, 0);
+    track.stop();
+
+    if (mode === 'snip') {
+      startSnipSelection(cvs);
+    } else {
+      cvs.toBlob(blob => { if (blob) uploadScreenshot(blob); }, 'image/png');
+    }
+  } catch (err) { console.log('Screenshot cancelled or failed:', err); }
+}
+
+function startSnipSelection(srcCanvas) {
+  const overlay = document.getElementById('snip-overlay');
+  const canvas = document.getElementById('snip-canvas');
+  const sel = document.getElementById('snip-sel');
+  canvas.width = srcCanvas.width;
+  canvas.height = srcCanvas.height;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(srcCanvas, 0, 0);
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  overlay.classList.add('active');
+  sel.style.display = 'none';
+
+  let startX, startY, dragging = false;
+
+  function toCanvasCoords(e) {
+    const r = canvas.getBoundingClientRect();
+    return { x: (e.clientX - r.left) / r.width * canvas.width, y: (e.clientY - r.top) / r.height * canvas.height };
+  }
+
+  function onDown(e) { const p = toCanvasCoords(e); startX = p.x; startY = p.y; dragging = true; sel.style.display = 'block'; }
+  function onMove(e) {
+    if (!dragging) return;
+    const p = toCanvasCoords(e);
+    const r = canvas.getBoundingClientRect();
+    const sx = Math.min(startX, p.x), sy = Math.min(startY, p.y);
+    const sw = Math.abs(p.x - startX), sh = Math.abs(p.y - startY);
+    sel.style.left = (sx / canvas.width * r.width + r.left) + 'px';
+    sel.style.top = (sy / canvas.height * r.height + r.top) + 'px';
+    sel.style.width = (sw / canvas.width * r.width) + 'px';
+    sel.style.height = (sh / canvas.height * r.height) + 'px';
+  }
+  function onUp(e) {
+    if (!dragging) return;
+    dragging = false;
+    const p = toCanvasCoords(e);
+    const sx = Math.round(Math.min(startX, p.x)), sy = Math.round(Math.min(startY, p.y));
+    const sw = Math.round(Math.abs(p.x - startX)), sh = Math.round(Math.abs(p.y - startY));
+    cleanup();
+    if (sw < 10 || sh < 10) return;
+    const crop = document.createElement('canvas');
+    crop.width = sw; crop.height = sh;
+    crop.getContext('2d').drawImage(srcCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
+    crop.toBlob(blob => { if (blob) uploadScreenshot(blob); }, 'image/png');
+  }
+  function onKey(e) { if (e.key === 'Escape') { cleanup(); } }
+
+  function cleanup() {
+    overlay.classList.remove('active');
+    sel.style.display = 'none';
+    overlay.removeEventListener('mousedown', onDown);
+    overlay.removeEventListener('mousemove', onMove);
+    overlay.removeEventListener('mouseup', onUp);
+    document.removeEventListener('keydown', onKey);
+  }
+
+  overlay.addEventListener('mousedown', onDown);
+  overlay.addEventListener('mousemove', onMove);
+  overlay.addEventListener('mouseup', onUp);
+  document.addEventListener('keydown', onKey);
+}
+
+async function uploadScreenshot(blob) {
+  const formData = new FormData();
+  formData.append('file', blob instanceof File ? blob : new File([blob], 'screenshot_' + Date.now() + '.png', { type: 'image/png' }));
+  try {
+    const resp = await fetch('/upload', { method: 'POST', body: formData });
+    const result = await resp.json();
+    if (result.path && activeSessionId) {
+      const blobUrl = URL.createObjectURL(blob);
+      pendingAttachments[activeSessionId] = { path: result.path, blobUrl };
+      showAttachPreview(activeSessionId, blobUrl);
+    }
+  } catch(err) { console.error('Screenshot upload failed:', err); }
+}
+
+function showAttachPreview(sessionId, blobUrl) {
+  clearAttachPreview(sessionId);
+  const session = sessions[sessionId];
+  if (!session) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'attach-preview';
+  wrap.dataset.sessionId = sessionId;
+  const img = document.createElement('img');
+  img.src = blobUrl;
+  const x = document.createElement('div');
+  x.className = 'attach-x';
+  x.textContent = '\u00d7';
+  x.onclick = () => clearAttachment(sessionId);
+  wrap.appendChild(img);
+  wrap.appendChild(x);
+  session.container.appendChild(wrap);
+}
+
+function clearAttachPreview(sessionId) {
+  const existing = document.querySelector(`.attach-preview[data-session-id="${sessionId}"]`);
+  if (existing) existing.remove();
+}
+
+function clearAttachment(sessionId) {
+  if (pendingAttachments[sessionId]) {
+    URL.revokeObjectURL(pendingAttachments[sessionId].blobUrl);
+    delete pendingAttachments[sessionId];
+  }
+  clearAttachPreview(sessionId);
+}
+
 let dragCounter = 0;
 const dropOverlay = document.getElementById('drop-overlay');
 document.addEventListener('dragenter', (e) => { e.preventDefault(); dragCounter++; dropOverlay.classList.add('active'); });
@@ -1305,6 +1630,15 @@ window.addEventListener('focus', () => {
     });
     for (const tab of saved.tabs) {
       openSession(tab.name, tab.isShell || false);
+      // Restore mute state
+      const sid = tab.name + (tab.isShell ? ':shell' : ':claude');
+      if (sessions[sid] && tab.muted) {
+        sessions[sid].muted = true;
+        fetch('http://127.0.0.1:7123/tts-state', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({project: tab.name, state: 'muted'})
+        }).catch(() => {});
+      }
     }
     if (saved.active) {
       const id = Object.keys(sessions).find(k => sessions[k].name === saved.active);
@@ -1314,6 +1648,32 @@ window.addEventListener('focus', () => {
     showPicker();
   }
 })();
+
+// ══════════════════════════════════════════
+//  TTS speaking indicator
+// ══════════════════════════════════════════
+setInterval(async () => {
+  try {
+    const resp = await fetch('http://127.0.0.1:7123/status');
+    const data = await resp.json();
+    const speaking = data.speaking_project;
+    document.querySelectorAll('.tab').forEach(tab => {
+      tab.classList.remove('speaking');
+    });
+    if (speaking) {
+      for (const [id, s] of Object.entries(sessions)) {
+        if (s.name === speaking) {
+          const tabs = document.querySelectorAll('.tab');
+          tabs.forEach(t => {
+            if (t.querySelector('.tab-name') && t.querySelector('.tab-name').textContent === s.name) {
+              t.classList.add('speaking');
+            }
+          });
+        }
+      }
+    }
+  } catch(e) {}
+}, 500);
 
 // ══════════════════════════════════════════
 //  Settings & Matrix Rain
