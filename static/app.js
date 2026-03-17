@@ -3,6 +3,13 @@
 // ══════════════════════════════════════════
 const sessions = {};  // { id: { name, term, ws, fitAddon, container, isShell } }
 let activeSessionId = null;
+const TTS_BASE = window.location.protocol + '//' + window.location.hostname + ':7123';
+const KOKORO_VOICES = [
+  'am_onyx','am_adam','am_michael','am_fenrir','am_puck','am_liam',
+  'af_bella','af_sarah','af_nicole','af_sky','af_heart',
+  'bm_george','bm_daniel','bm_lewis','bm_fable',
+  'bf_emma','bf_isabella','ff_siwis'
+];
 let layout = 'single';
 let paneSlots = [];  // session IDs assigned to panes
 let selectedPane = 0;  // which pane is selected for tab assignment
@@ -529,6 +536,9 @@ function renderTabs() {
       (s.isShell ? '<span class="tab-shell">SHELL</span>' : '') +
       '<span class="tab-close" onclick="event.stopPropagation(); closeSession(\'' + id + '\')">&times;</span>';
     tab.onclick = () => switchTab(id);
+    if (!s.isShell) {
+      tab.oncontextmenu = (e) => { e.preventDefault(); showVoicePicker(id, e); };
+    }
     strip.appendChild(tab);
   }
   const addBtn = document.createElement('div');
@@ -538,11 +548,41 @@ function renderTabs() {
   strip.appendChild(addBtn);
 }
 
+function showVoicePicker(sessionId, event) {
+  closeVoicePicker();
+  const s = sessions[sessionId];
+  if (!s) return;
+  const dd = document.createElement('div');
+  dd.id = 'voice-picker';
+  dd.style.left = event.clientX + 'px';
+  dd.style.top = event.clientY + 'px';
+  KOKORO_VOICES.forEach(v => {
+    const btn = document.createElement('button');
+    btn.textContent = v;
+    btn.onclick = () => {
+      fetch(TTS_BASE + '/project-voice', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({project: s.name, voice: v})
+      }).catch(() => {});
+      closeVoicePicker();
+    };
+    dd.appendChild(btn);
+  });
+  document.body.appendChild(dd);
+  setTimeout(() => document.addEventListener('click', closeVoicePicker, { once: true }), 0);
+}
+
+function closeVoicePicker() {
+  const existing = document.getElementById('voice-picker');
+  if (existing) existing.remove();
+}
+
 function toggleMute(id) {
   if (!sessions[id]) return;
   const s = sessions[id];
   s.muted = !s.muted;
-  fetch('http://127.0.0.1:7123/tts-state', {
+  fetch(TTS_BASE + '/tts-state', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({project: s.name, state: s.muted ? 'muted' : 'default'})
@@ -689,6 +729,8 @@ function renderPanes() {
 // ══════════════════════════════════════════
 async function uploadFile(file) {
   const formData = new FormData();
+  const projectName = activeSessionId && sessions[activeSessionId] ? sessions[activeSessionId].name : '';
+  if (projectName) formData.append('project', projectName);
   formData.append('file', file);
   try {
     const resp = await fetch('/upload', { method: 'POST', body: formData });
@@ -769,6 +811,13 @@ function startSnipSelection(srcCanvas) {
     const r = canvas.getBoundingClientRect();
     const sx = Math.min(startX, p.x), sy = Math.min(startY, p.y);
     const sw = Math.abs(p.x - startX), sh = Math.abs(p.y - startY);
+    // Redraw: dimmed base + bright selection
+    ctx.drawImage(srcCanvas, 0, 0);
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    if (sw > 0 && sh > 0) {
+      ctx.drawImage(srcCanvas, sx, sy, sw, sh, sx, sy, sw, sh);
+    }
     sel.style.left = (sx / canvas.width * r.width + r.left) + 'px';
     sel.style.top = (sy / canvas.height * r.height + r.top) + 'px';
     sel.style.width = (sw / canvas.width * r.width) + 'px';
@@ -804,18 +853,62 @@ function startSnipSelection(srcCanvas) {
   document.addEventListener('keydown', onKey);
 }
 
+function compressImage(blob, maxWidth, quality) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = img.width > maxWidth ? maxWidth / img.width : 1;
+      const cvs = document.createElement('canvas');
+      cvs.width = Math.round(img.width * scale);
+      cvs.height = Math.round(img.height * scale);
+      cvs.getContext('2d').drawImage(img, 0, 0, cvs.width, cvs.height);
+      cvs.toBlob(resolve, 'image/jpeg', quality);
+      URL.revokeObjectURL(img.src);
+    };
+    img.src = URL.createObjectURL(blob);
+  });
+}
+
+let sessionImageCount = 0;
+
+function updateImageCounter() {
+  let counter = document.getElementById('image-counter');
+  if (!counter) {
+    counter = document.createElement('span');
+    counter.id = 'image-counter';
+    const bar = document.getElementById('top-bar');
+    if (bar) bar.appendChild(counter);
+  }
+  counter.textContent = sessionImageCount > 0 ? sessionImageCount + ' img' : '';
+}
+
 async function uploadScreenshot(blob) {
-  const formData = new FormData();
-  formData.append('file', blob instanceof File ? blob : new File([blob], 'screenshot_' + Date.now() + '.png', { type: 'image/png' }));
+  const ts = Date.now();
+  const projectName = activeSessionId && sessions[activeSessionId] ? sessions[activeSessionId].name : '';
+
+  // Upload full quality original
+  const rawForm = new FormData();
+  if (projectName) rawForm.append('project', projectName);
+  rawForm.append('file', new File([blob], 'screenshot_' + ts + '.png', { type: 'image/png' }));
+  fetch('/upload', { method: 'POST', body: rawForm }).catch(() => {});
+
+  // Upload compressed version for Claude into sm/ subfolder
+  const compressed = await compressImage(blob, 1280, 0.8);
+  const compForm = new FormData();
+  if (projectName) compForm.append('project', projectName);
+  compForm.append('subfolder', 'sm');
+  compForm.append('file', new File([compressed], 'screenshot_' + ts + '.jpg', { type: 'image/jpeg' }));
   try {
-    const resp = await fetch('/upload', { method: 'POST', body: formData });
+    const resp = await fetch('/upload', { method: 'POST', body: compForm });
     const result = await resp.json();
     if (result.path && activeSessionId) {
-      const blobUrl = URL.createObjectURL(blob);
+      const blobUrl = URL.createObjectURL(compressed);
       if (!pendingAttachments[activeSessionId]) pendingAttachments[activeSessionId] = [];
       const idx = pendingAttachments[activeSessionId].length;
       pendingAttachments[activeSessionId].push({ path: result.path, blobUrl });
       addAttachPreview(activeSessionId, blobUrl, idx);
+      sessionImageCount++;
+      updateImageCounter();
     }
   } catch(err) { console.error('Screenshot upload failed:', err); }
 }
@@ -915,7 +1008,7 @@ window.addEventListener('focus', () => {
       const sid = tab.name + (tab.isShell ? ':shell' : ':claude');
       if (sessions[sid] && tab.muted) {
         sessions[sid].muted = true;
-        fetch('http://127.0.0.1:7123/tts-state', {
+        fetch(TTS_BASE + '/tts-state', {
           method: 'POST', headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({project: tab.name, state: 'muted'})
         }).catch(() => {});
@@ -935,7 +1028,7 @@ window.addEventListener('focus', () => {
 // ══════════════════════════════════════════
 setInterval(async () => {
   try {
-    const resp = await fetch('http://127.0.0.1:7123/status');
+    const resp = await fetch(TTS_BASE + '/status');
     const data = await resp.json();
     const speaking = data.speaking_project;
     document.querySelectorAll('.tab').forEach(tab => {
