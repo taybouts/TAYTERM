@@ -10,6 +10,8 @@ import json
 import ssl
 import logging
 import time
+import re
+import urllib.request
 from aiohttp import web
 
 signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -67,10 +69,99 @@ class Terminal:
             except: pass
 
 
+TTS_URL = "http://127.0.0.1:7123"
+
+# Regex to strip ANSI escape sequences
+ANSI_RE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]|\x1b\].*?\x07|\x1b[()][AB012]|\x1b\[[\?]?[0-9;]*[hl]|\r')
+
+
+class TTSTap:
+    """Accumulates plain text from PTY stream, sends sentences to TTS."""
+
+    def __init__(self, project):
+        self.project = project
+        self.buffer = ""
+        self.in_code_block = False
+        self.sentences_sent = set()
+
+    def _clean_markdown(self, text):
+        text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+        text = re.sub(r'\*(.+?)\*', r'\1', text)
+        text = re.sub(r'`(.+?)`', r'\1', text)
+        text = re.sub(r'\[(.+?)\]\(.+?\)', r'\1', text)
+        text = re.sub(r'^\s*[-*]\s+', '', text)
+        text = re.sub(r'^\s*\d+\.\s+', '', text)
+        return text.strip()
+
+    def _should_skip(self, line):
+        stripped = line.strip()
+        if not stripped or len(stripped) <= 2:
+            return True
+        if re.match(r'^\s*```', stripped):
+            self.in_code_block = not self.in_code_block
+            return True
+        if self.in_code_block:
+            return True
+        if re.match(r'^\s*\|.*\|', stripped):
+            return True
+        if re.match(r'^\s*[-=]{3,}$', stripped):
+            return True
+        # Skip file paths, tool output, prompts
+        if re.match(r'^\s*(>|\$|#!|C:\\|/[a-z])', stripped):
+            return True
+        return False
+
+    def _send_to_tts(self, sentence):
+        """Fire-and-forget HTTP call to TTS server."""
+        try:
+            data = json.dumps({"text": sentence, "project": self.project}).encode()
+            req = urllib.request.Request(
+                f"{TTS_URL}/speak", data=data,
+                headers={"Content-Type": "application/json"}, method="POST"
+            )
+            urllib.request.urlopen(req, timeout=2)
+        except Exception:
+            pass
+
+    def feed(self, raw_data):
+        """Feed raw PTY data, extract and speak sentences."""
+        # Strip ANSI codes
+        plain = ANSI_RE.sub('', raw_data)
+        if not plain.strip():
+            return
+
+        self.buffer += plain
+
+        # Process complete lines + detect sentences
+        while '\n' in self.buffer:
+            line, self.buffer = self.buffer.split('\n', 1)
+            if self._should_skip(line):
+                continue
+            cleaned = self._clean_markdown(line)
+            if not cleaned:
+                continue
+            # Split into sentences
+            parts = re.split(r'(?<=[.!?:])(?:\s+|\n)', cleaned)
+            for sentence in parts:
+                s = sentence.strip()
+                if not s or len(s) <= 2:
+                    continue
+                key = s[:60]
+                if key in self.sentences_sent:
+                    continue
+                self.sentences_sent.add(key)
+                self._send_to_tts(s)
+
+
 def start_reader(project_name):
     """Background task: read from PTY, broadcast to all connected browsers."""
     entry = active_terminals[project_name]
     term = entry["terminal"]
+    # Set up TTS tap for Claude sessions
+    tts_tap = None
+    if project_name.endswith(":claude"):
+        proj = project_name.split(":")[0]
+        tts_tap = TTSTap(proj)
 
     async def reader():
         loop = asyncio.get_event_loop()
@@ -86,6 +177,9 @@ def start_reader(project_name):
                             except:
                                 dead.add(ws)
                         entry["subscribers"] -= dead
+                        # Feed to TTS tap (fire-and-forget in executor)
+                        if tts_tap:
+                            loop.run_in_executor(None, tts_tap.feed, data)
                         await asyncio.sleep(0.01)
                 except EOFError:
                     break
@@ -306,12 +400,35 @@ async def api_new_project(request):
 
 async def upload_handler(request):
     """Save uploaded file (pasted image or dropped file), return its path."""
-    upload_dir = os.path.join(PROJECTS_DIR, ".tayterm_uploads")
-    os.makedirs(upload_dir, exist_ok=True)
     reader = await request.multipart()
+    # Check for project/subfolder fields first
+    project = None
+    subfolder = None
     field = await reader.next()
+    while field:
+        if field.name == 'project':
+            project = (await field.read()).decode('utf-8').strip()
+            field = await reader.next()
+            continue
+        if field.name == 'subfolder':
+            subfolder = (await field.read()).decode('utf-8').strip()
+            field = await reader.next()
+            continue
+        if field.name == 'file':
+            break
+        field = await reader.next()
+
     if not field:
         return web.json_response({"error": "no file"}, status=400)
+
+    # Save to project's .screenshots/ folder if project specified
+    if project:
+        upload_dir = os.path.join(PROJECTS_DIR, project, ".screenshots")
+    else:
+        upload_dir = os.path.join(PROJECTS_DIR, ".tayterm_uploads")
+    if subfolder:
+        upload_dir = os.path.join(upload_dir, subfolder)
+    os.makedirs(upload_dir, exist_ok=True)
 
     filename = field.filename or f"paste_{int(time.time() * 1000)}.png"
     filename = os.path.basename(filename)
