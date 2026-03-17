@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>TAYTERM</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.min.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@300;400;500&display=swap" rel="stylesheet">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#000000">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<canvas id="matrix-bg"></canvas>
+
+<!-- Project Picker -->
+<div id="picker">
+  <div id="picker-header"><h1>> TAYTERM_</h1><div id="picker-right"><button id="new-project-btn" onclick="newProject()">+ New</button><button id="gear-btn" title="Settings">&#9881;</button></div></div>
+  <div id="project-grid"></div>
+</div>
+
+<!-- Terminal View -->
+<div id="terminal-view">
+  <div id="top-bar">
+    <button id="back-btn" onclick="showPicker()">&#9664;</button>
+    <div id="tab-strip"></div>
+    <div id="layout-btns">
+      <button class="layout-btn active" data-layout="single" onclick="setLayout('single')"><svg width="14" height="12" viewBox="0 0 14 12"><rect x="1" y="1" width="12" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></button>
+      <button class="layout-btn" data-layout="hsplit" onclick="setLayout('hsplit')"><svg width="14" height="12" viewBox="0 0 14 12"><rect x="1" y="1" width="5" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="8" y="1" width="5" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></button>
+      <button class="layout-btn" data-layout="vsplit" onclick="setLayout('vsplit')"><svg width="14" height="12" viewBox="0 0 14 12"><rect x="1" y="1" width="12" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="1" y="7" width="12" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></button>
+      <button class="layout-btn" data-layout="triple" onclick="setLayout('triple')"><svg width="14" height="12" viewBox="0 0 14 12"><rect x="0.5" y="1" width="3.5" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="5.25" y="1" width="3.5" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="10" y="1" width="3.5" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/></svg></button>
+      <button class="layout-btn" data-layout="quad" onclick="setLayout('quad')"><svg width="14" height="12" viewBox="0 0 14 12"><rect x="1" y="1" width="5" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="8" y="1" width="5" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="1" y="7" width="5" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="8" y="7" width="5" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></button>
+      <span id="screenshot-wrap">
+        <button class="layout-btn" onclick="toggleScreenshotMenu(event)" title="Screenshot"><svg width="14" height="12" viewBox="0 0 14 12"><rect x="1" y="2" width="12" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="7" cy="7" r="2.5" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="4" y="1" width="3" height="2" rx="0.5" fill="currentColor"/></svg></button>
+        <div id="screenshot-dropdown">
+          <button onclick="doScreenshot('snip')">Snip Region</button>
+          <button onclick="doScreenshot('window')">Window</button>
+          <button onclick="doScreenshot('screen')">Screen</button>
+        </div>
+      </span>
+      <button id="fullscreen-btn" onclick="toggleFullscreen()" title="Fullscreen">&#x26F6;</button>
+    </div>
+  </div>
+  <div id="pane-area" class="layout-single"></div>
+</div>
+
+<div id="drop-overlay">DROP FILE</div>
+<div id="snip-overlay"><canvas id="snip-canvas"></canvas><div id="snip-sel"></div></div>
+
+<!-- Confirm Modal -->
+<div id="confirm-modal" onclick="if(event.target===this)closeConfirm()">
+  <div class="confirm-panel">
+    <p id="confirm-msg"></p>
+    <div class="confirm-btns">
+      <button class="btn-no" onclick="closeConfirm()">Cancel</button>
+      <button class="btn-yes" id="confirm-yes">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- Resume Modal -->
+<div id="resume-modal" onclick="if(event.target===this)closeResumeModal()">
+  <div class="resume-panel">
+    <div class="resume-header">
+      <h2 id="resume-title">Resume Session</h2>
+      <button class="resume-close" onclick="closeResumeModal()">&times;</button>
+    </div>
+    <div class="resume-list" id="resume-list"></div>
+  </div>
+</div>
+
+<!-- Settings Panel -->
+<div id="settings-panel">
+  <button id="settings-close" onclick="toggleSettings()">&times;</button>
+  <h2>Settings</h2>
+
+  <div class="setting-toggle" onclick="toggleScanlines()">
+    <span>Scanlines</span>
+    <div class="toggle-switch" id="toggle-scanlines"></div>
+  </div>
+
+  <div class="setting-toggle" onclick="toggleRain()">
+    <span>Matrix Rain</span>
+    <div class="toggle-switch on" id="toggle-rain"></div>
+  </div>
+
+  <div class="setting-group">
+    <label>Opacity <span id="val-opacity">0.12</span></label>
+    <input type="range" id="sl-opacity" min="0" max="30" value="12" oninput="updateSetting('opacity', this.value/100)">
+  </div>
+
+  <div class="setting-group">
+    <label>Speed <span id="val-speed">50ms</span></label>
+    <input type="range" id="sl-speed" min="20" max="150" value="50" oninput="updateSetting('speed', +this.value)">
+  </div>
+
+  <div class="setting-group">
+    <label>Fade <span id="val-fade">0.05</span></label>
+    <input type="range" id="sl-fade" min="1" max="25" value="5" oninput="updateSetting('fade', this.value/100)">
+  </div>
+
+  <div class="setting-group">
+    <label>Font Size <span id="val-fontSize">14px</span></label>
+    <input type="range" id="sl-fontSize" min="8" max="28" value="14" oninput="updateSetting('fontSize', +this.value)">
+  </div>
+
+  <div class="setting-group">
+    <label>Color</label>
+    <div class="color-presets">
+      <div class="color-preset active" style="background:#00ff41" onclick="updateSetting('color','#00ff41')" title="Green"></div>
+      <div class="color-preset" style="background:#00ccff" onclick="updateSetting('color','#00ccff')" title="Cyan"></div>
+      <div class="color-preset" style="background:#ff0040" onclick="updateSetting('color','#ff0040')" title="Red"></div>
+      <div class="color-preset" style="background:#ffaa00" onclick="updateSetting('color','#ffaa00')" title="Amber"></div>
+      <div class="color-preset" style="background:#cc44ff" onclick="updateSetting('color','#cc44ff')" title="Purple"></div>
+      <div class="color-preset" style="background:#ffffff" onclick="updateSetting('color','#ffffff')" title="White"></div>
+    </div>
+  </div>
+</div>
+
+<div class="scanlines" id="scanlines-overlay" style="display:none"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/lib/addon-fit.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.19.0/lib/addon-webgl.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
