@@ -760,6 +760,7 @@ function handleWebSocket(ws, req) {
             rows: 30,
             cwd: projectPath,
             env,
+            useConpty: false,
         });
 
         entry = { pty: ptyProc, subscribers: new Set(), headlessTerm: null, ttsTap: null };
