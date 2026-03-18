@@ -1,0 +1,30 @@
+{
+  "name": "tayterm",
+  "version": "1.0.0",
+  "description": "Self-hosted web terminal with persistent PTY sessions, multi-device sync, and Claude AI integration. Access your terminal from any browser — iPad, phone, work PC — over Tailscale.",
+  "main": "server.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/taybouts/TAYTERM.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/taybouts/TAYTERM/issues"
+  },
+  "homepage": "https://github.com/taybouts/TAYTERM#readme",
+  "dependencies": {
+    "@xterm/headless": "^6.0.0",
+    "node-pty": "^1.1.0",
+    "ws": "^8.19.0"
+  }
+}
