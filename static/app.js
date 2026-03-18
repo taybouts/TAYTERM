@@ -358,7 +358,7 @@ function openSession(name, isShell, continueFlag, resumeId) {
   const fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
   term.open(container);
-  if (!isMobile) { try { term.loadAddon(new WebglAddon.WebglAddon()); } catch(e) {} }
+  try { term.loadAddon(new WebglAddon.WebglAddon()); } catch(e) {}
 
   // Scroll-to-bottom button
   const scrollBtn = document.createElement('div');
@@ -393,10 +393,7 @@ function openSession(name, isShell, continueFlag, resumeId) {
     fitAddon.fit();
     if (!isMobile) {
       const dims = fitAddon.proposeDimensions() || { cols: 120, rows: 30 };
-      ws.send(JSON.stringify({ type: 'resize', cols: dims.cols - 1, rows: dims.rows }));
-      setTimeout(() => {
-        ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
-      }, 50);
+      ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
     }
   };
 
@@ -426,9 +423,13 @@ function openSession(name, isShell, continueFlag, resumeId) {
     }
   });
 
+  let resizeTimer = null;
   term.onResize(({ cols, rows }) => {
     if (!isMobile && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+      }, 100);
     }
   });
 
