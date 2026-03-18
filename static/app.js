@@ -393,7 +393,10 @@ function openSession(name, isShell, continueFlag, resumeId) {
     fitAddon.fit();
     if (!isMobile) {
       const dims = fitAddon.proposeDimensions() || { cols: 120, rows: 30 };
-      ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
+      ws.send(JSON.stringify({ type: 'resize', cols: dims.cols - 1, rows: dims.rows }));
+      setTimeout(() => {
+        ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
+      }, 50);
     }
   };
 
@@ -423,13 +426,9 @@ function openSession(name, isShell, continueFlag, resumeId) {
     }
   });
 
-  let resizeTimer = null;
   term.onResize(({ cols, rows }) => {
     if (!isMobile && ws.readyState === WebSocket.OPEN) {
-      clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(() => {
-        ws.send(JSON.stringify({ type: 'resize', cols, rows }));
-      }, 100);
+      ws.send(JSON.stringify({ type: 'resize', cols, rows }));
     }
   });
 
@@ -742,11 +741,8 @@ function renderPanes() {
         sessions[sid].term.focus();
       };
 
-      // Fit after render
-      setTimeout(() => {
-        s.fitAddon.fit();
-        s.term.refresh(0, s.term.rows - 1);
-      }, 50);
+      // Fit after render — single fit, no refresh (WebGL handles repaints)
+      setTimeout(() => s.fitAddon.fit(), 50);
     } else if (isMultiPane) {
       // Empty pane — clickable to select it
       const paneIdx = i;
@@ -762,14 +758,6 @@ function renderPanes() {
     area.appendChild(pane);
   }
 
-  // Refit all visible sessions
-  setTimeout(() => {
-    for (const sid of paneSlots) {
-      if (sid && sessions[sid]) {
-        sessions[sid].fitAddon.fit();
-      }
-    }
-  }, 100);
 }
 
 // ══════════════════════════════════════════
@@ -1032,14 +1020,7 @@ document.addEventListener('drop', (e) => {
 // ══════════════════════════════════════════
 //  Window events
 // ══════════════════════════════════════════
-window.addEventListener('focus', () => {
-  for (const s of Object.values(sessions)) {
-    if (s.container.style.display !== 'none') {
-      s.fitAddon.fit();
-      s.term.refresh(0, s.term.rows - 1);
-    }
-  }
-});
+// No focus handler — WebGL handles repaints, fit() on focus causes scroll thrashing
 
 // ══════════════════════════════════════════
 //  Init — restore or show picker

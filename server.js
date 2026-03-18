@@ -798,11 +798,7 @@ function handleWebSocket(ws, req) {
                 }
             } else if (payload.type === 'resize') {
                 if (entry.pty) {
-                    // Debounce resize to prevent ConPTY flicker
-                    clearTimeout(entry._resizeTimer);
-                    entry._resizeTimer = setTimeout(() => {
-                        if (entry.pty) entry.pty.resize(payload.cols, payload.rows);
-                    }, 150);
+                    entry.pty.resize(payload.cols, payload.rows);
                 }
             }
         } catch (e) { /* ignore */ }
