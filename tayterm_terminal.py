@@ -114,8 +114,21 @@ class TTSTap:
             return True
         if re.match(r'^\s*[-=]{3,}$', stripped):
             return True
-        # Skip file paths, tool output, prompts
-        if re.match(r'^\s*(>|\$|#!|C:\\|/[a-z])', stripped):
+        # Skip file paths, tool output, prompts, shell stuff
+        if re.match(r'^\s*(>|\$|#!|C:\\|/[a-z]|PS\s)', stripped):
+            return True
+        # Skip PowerShell/shell noise
+        if re.match(r'^\s*(Windows PowerShell|Copyright|All rights reserved|Install the latest|https?://)', stripped):
+            return True
+        # Skip command lines (claude, git, python, etc.)
+        if re.match(r'^\s*(claude|git|python|pip|npm|node|cd |ls |dir |cat )', stripped):
+            return True
+        # Skip lines that are mostly non-alpha (code, paths, numbers)
+        alpha_chars = sum(1 for c in stripped if c.isalpha())
+        if len(stripped) > 0 and alpha_chars / len(stripped) < 0.4:
+            return True
+        # Minimum word count for natural speech
+        if len(stripped.split()) < 5:
             return True
         return False
 
