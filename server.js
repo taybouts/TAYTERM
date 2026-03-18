@@ -752,17 +752,15 @@ function handleWebSocket(ws, req) {
         }
         env.TERM = 'xterm-256color';
         env.COLORTERM = 'truecolor';
-        env.TERM_PROGRAM = 'xterm';
+        // Do NOT set TERM_PROGRAM — let Claude Code detect it naturally
 
-        // Create new PTY
+        // Create new PTY — use ConPTY (default) for correct true-color support
         const ptyProc = pty.spawn('powershell.exe', [], {
             name: 'xterm-256color',
             cols: 120,
             rows: 30,
             cwd: projectPath,
             env,
-            useConpty: false,
-            encoding: 'utf8',
         });
 
         entry = { pty: ptyProc, subscribers: new Set(), headlessTerm: null, ttsTap: null };

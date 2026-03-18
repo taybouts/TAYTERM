@@ -393,7 +393,10 @@ function openSession(name, isShell, continueFlag, resumeId) {
     fitAddon.fit();
     if (!isMobile) {
       const dims = fitAddon.proposeDimensions() || { cols: 120, rows: 30 };
-      ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
+      ws.send(JSON.stringify({ type: 'resize', cols: dims.cols - 1, rows: dims.rows }));
+      setTimeout(() => {
+        ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
+      }, 50);
     }
   };
 
@@ -818,7 +821,8 @@ async function doScreenshot(mode) {
     cvs.width = video.videoWidth;
     cvs.height = video.videoHeight;
     cvs.getContext('2d').drawImage(video, 0, 0);
-    track.stop();
+    stream.getTracks().forEach(t => t.stop());
+    video.srcObject = null;
 
     if (mode === 'snip') {
       startSnipSelection(cvs);
