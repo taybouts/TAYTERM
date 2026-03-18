@@ -3,6 +3,9 @@
 // ══════════════════════════════════════════
 const sessions = {};  // { id: { name, term, ws, fitAddon, container, isShell } }
 let activeSessionId = null;
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+const isIPadOS = navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1 && !/Windows/.test(navigator.userAgent);
+const isMobile = (isIOS || isIPadOS) && screen.width <= 1400;
 const TTS_BASE = window.location.protocol + '//' + window.location.hostname + ':7123';
 const KOKORO_VOICES = [
   'am_onyx','am_adam','am_michael','am_fenrir','am_puck','am_liam',
@@ -114,7 +117,11 @@ function buildCard(p, isPinned, pinIdx, pinCount) {
     '<div class="project-badges">' + badges + '</div>' +
     '<div class="project-actions">' + actionsHtml + '</div>' +
     (p.desc ? '<div class="project-desc">' + p.desc + '</div>' : '<div class="project-desc">&nbsp;</div>');
-  card.onclick = () => p.can_continue ? continueSession(p.name) : openSession(p.name, false);
+  if (isMobile) {
+    card.onclick = () => mobileOpenSession(p.name, p.can_continue);
+  } else {
+    card.onclick = () => p.can_continue ? continueSession(p.name) : openSession(p.name, false);
+  }
   return card;
 }
 
@@ -351,7 +358,7 @@ function openSession(name, isShell, continueFlag, resumeId) {
   const fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
   term.open(container);
-  try { term.loadAddon(new WebglAddon.WebglAddon()); } catch(e) {}
+  if (!isMobile) { try { term.loadAddon(new WebglAddon.WebglAddon()); } catch(e) {} }
 
   // Scroll-to-bottom button
   const scrollBtn = document.createElement('div');
@@ -384,11 +391,13 @@ function openSession(name, isShell, continueFlag, resumeId) {
 
   ws.onopen = () => {
     fitAddon.fit();
-    const dims = fitAddon.proposeDimensions() || { cols: 120, rows: 30 };
-    ws.send(JSON.stringify({ type: 'resize', cols: dims.cols - 1, rows: dims.rows }));
-    setTimeout(() => {
-      ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
-    }, 50);
+    if (!isMobile) {
+      const dims = fitAddon.proposeDimensions() || { cols: 120, rows: 30 };
+      ws.send(JSON.stringify({ type: 'resize', cols: dims.cols - 1, rows: dims.rows }));
+      setTimeout(() => {
+        ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
+      }, 50);
+    }
   };
 
   ws.onmessage = (e) => {
@@ -418,7 +427,7 @@ function openSession(name, isShell, continueFlag, resumeId) {
   });
 
   term.onResize(({ cols, rows }) => {
-    if (ws.readyState === WebSocket.OPEN) {
+    if (!isMobile && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'resize', cols, rows }));
     }
   });
@@ -1034,6 +1043,12 @@ window.addEventListener('focus', () => {
 //  Init — restore or show picker
 // ══════════════════════════════════════════
 (function init() {
+  if (isMobile) {
+    document.body.classList.add('mobile');
+    document.getElementById('terminal-view').style.display = 'none';
+    showPicker();
+    return;
+  }
   const saved = loadState();
   if (saved && saved.tabs && saved.tabs.length > 0) {
     layout = saved.layout || 'single';
@@ -1041,7 +1056,8 @@ window.addEventListener('focus', () => {
       b.classList.toggle('active', b.dataset.layout === layout);
     });
     for (const tab of saved.tabs) {
-      openSession(tab.name, tab.isShell || false, !tab.isShell);
+      const isActive = saved.active && tab.name === saved.active;
+      openSession(tab.name, tab.isShell || false, !tab.isShell && isActive);
       // Restore mute state
       const sid = tab.name + (tab.isShell ? ':shell' : ':claude');
       if (sessions[sid] && tab.muted) {
@@ -1210,3 +1226,233 @@ window.addEventListener('resize', () => {
     if (s.container.style.display !== 'none') s.fitAddon.fit();
   }
 });
+
+// ==========================================
+//  Mobile Chat UI
+// ==========================================
+let mobileWs = null;
+let mobileProject = null;
+let mobileMuted = false;
+let mobileLastMsgCount = 0;
+let mobilePollTimer = null;
+
+function mobileInit() {
+  if (!isMobile) return;
+  // Hide desktop UI, show mobile picker
+  document.getElementById('terminal-view').style.display = 'none';
+  // The picker works for mobile too — cards open mobile chat instead
+}
+
+function mobileOpenSession(name, continueFlag) {
+  mobileProject = name;
+  document.getElementById('picker').style.display = 'none';
+  document.getElementById('mobile-chat').style.display = 'flex';
+  document.getElementById('mobile-project-name').textContent = name;
+  document.getElementById('mobile-messages').innerHTML = '';
+  document.getElementById('mobile-mute').textContent = 'MUTE';
+  document.getElementById('mobile-mute').classList.remove('muted');
+  mobileMuted = false;
+
+  // Load conversation history from JSONL
+  mobileLoadHistory(name);
+
+  // Connect WebSocket — live PTY stream
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const params = 'project=' + encodeURIComponent(name) + (continueFlag ? '&continue=1' : '&claude=1');
+  mobileWs = new WebSocket(proto + '//' + location.host + '/ws?' + params);
+
+  let streamBuffer = '';
+  let streamTimeout = null;
+  mobileWs.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'output' && msg.data) {
+        streamBuffer += msg.data;
+        clearTimeout(streamTimeout);
+        streamTimeout = setTimeout(() => {
+          mobileAppendStreaming(streamBuffer);
+          streamBuffer = '';
+        }, 100);
+      }
+    } catch(err) {}
+  };
+
+  // Auto-grow textarea
+  const input = document.getElementById('mobile-input');
+  input.value = '';
+  input.addEventListener('input', () => {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      mobileSend();
+    }
+  });
+  input.focus();
+}
+
+async function mobileLoadHistory(name) {
+  try {
+    const resp = await fetch('/api/conversation?name=' + encodeURIComponent(name));
+    const messages = await resp.json();
+    const container = document.getElementById('mobile-messages');
+    for (const msg of messages) {
+      if (msg.role === 'user' && msg.text) {
+        mobileAddMessage('user', msg.text);
+      } else if (msg.role === 'assistant' && msg.text) {
+        mobileAddMessage('assistant', msg.text);
+      } else if (msg.type === 'tool_use' && msg.name) {
+        mobileAddTool(msg.name, msg.summary || '');
+      }
+    }
+    mobileLastMsgCount = messages.length;
+    container.scrollTop = container.scrollHeight;
+  } catch(err) {}
+}
+
+function mobileAddMessage(role, text) {
+  const container = document.getElementById('mobile-messages');
+  const div = document.createElement('div');
+  div.className = 'msg ' + role;
+  if (role === 'assistant') {
+    div.innerHTML = mobileRenderMarkdown(text);
+    // Make code blocks tappable
+    div.querySelectorAll('pre').forEach(pre => {
+      pre.onclick = () => pre.classList.toggle('expanded');
+    });
+  } else {
+    div.textContent = text;
+  }
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+}
+
+function mobileAddTool(name, summary) {
+  const container = document.getElementById('mobile-messages');
+  const div = document.createElement('div');
+  div.className = 'msg-tool';
+  div.innerHTML = '<span class="tool-name">' + name + '</span>' + (summary ? ' ' + summary : '');
+  container.appendChild(div);
+}
+
+// Strip ALL ANSI escape sequences (including true-color, OSC, cursor movement)
+const ANSI_STRIP = /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[()][AB012]|\x1b[>=<]|\x1b\[[\d;]*m|\r|\x0f/g;
+
+function mobileCleanOutput(text) {
+  text = text.replace(ANSI_STRIP, '');
+  // Filter out lines that are tool output, diffs, file paths, prompts
+  const lines = text.split('\n').filter(line => {
+    const s = line.trim();
+    if (!s) return false;
+    // Skip diff lines
+    if (/^[+-]{3}\s/.test(s)) return false;
+    if (/^@@\s/.test(s)) return false;
+    if (/^[+-]\s/.test(s) && !s.startsWith('- ')) return false;
+    // Skip line numbers from diffs
+    if (/^\d+[+-]?\s/.test(s) && s.length < 8) return false;
+    // Skip file paths
+    if (/^(C:\\|\/[a-z]|\.\.\/|src\/)/i.test(s)) return false;
+    // Skip tool status lines
+    if (/^(Reading|Writing|Editing|Searching|Running|Created|Updated)\s/i.test(s)) return false;
+    // Skip box drawing / borders
+    if (/^[─━═│┃┌┐└┘├┤┬┴┼╋▎▌]+$/.test(s)) return false;
+    if (/^[\s]*[│|]/.test(s)) return false;
+    return true;
+  });
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function mobileRenderMarkdown(text) {
+  // Code blocks
+  text = text.replace(/```[\w]*\n([\s\S]*?)```/g, '<pre>$1</pre>');
+  // Inline code
+  text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+  // Bold
+  text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  // Italic
+  text = text.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  // Line breaks to paragraphs
+  text = text.split('\n\n').map(p => '<p>' + p.replace(/\n/g, '<br>') + '</p>').join('');
+  return text;
+}
+
+let mobileStreamDiv = null;
+
+function mobileAppendStreaming(rawData) {
+  const clean = mobileCleanOutput(rawData);
+  if (!clean) return;
+  const container = document.getElementById('mobile-messages');
+  if (!mobileStreamDiv) {
+    mobileStreamDiv = document.createElement('div');
+    mobileStreamDiv.className = 'msg assistant';
+    container.appendChild(mobileStreamDiv);
+  }
+  mobileStreamDiv.innerHTML = mobileRenderMarkdown(
+    (mobileStreamDiv.dataset.raw || '') + clean
+  );
+  mobileStreamDiv.dataset.raw = (mobileStreamDiv.dataset.raw || '') + clean;
+  mobileStreamDiv.querySelectorAll('pre').forEach(pre => {
+    pre.onclick = () => pre.classList.toggle('expanded');
+  });
+  container.scrollTop = container.scrollHeight;
+}
+
+function mobileSend() {
+  const input = document.getElementById('mobile-input');
+  const text = input.value.trim();
+  if (!text || !mobileWs || mobileWs.readyState !== WebSocket.OPEN) return;
+  mobileAddMessage('user', text);
+  mobileStreamDiv = null;  // Next output starts a new assistant bubble
+  mobileWs.send(JSON.stringify({ type: 'input', data: text + '\r' }));
+  input.value = '';
+  input.style.height = 'auto';
+}
+
+async function mobilePollConversation(name) {
+  try {
+    const resp = await fetch('/api/conversation?name=' + encodeURIComponent(name));
+    const messages = await resp.json();
+    if (messages.length > mobileLastMsgCount) {
+      // Render only new messages
+      const newMsgs = messages.slice(mobileLastMsgCount);
+      for (const msg of newMsgs) {
+        if (msg.role === 'user' && msg.text) {
+          // Skip if we already added it locally via mobileSend
+          // Check last user msg in DOM
+        } else if (msg.role === 'assistant' && msg.text) {
+          mobileAddMessage('assistant', msg.text);
+        } else if (msg.type === 'tool_use' && msg.name) {
+          mobileAddTool(msg.name, msg.summary || '');
+        }
+      }
+      mobileLastMsgCount = messages.length;
+    }
+  } catch(err) {}
+}
+
+function mobileShowPicker() {
+  if (mobileWs) mobileWs.close();
+  if (mobilePollTimer) clearInterval(mobilePollTimer);
+  mobileWs = null;
+  mobileProject = null;
+  mobilePollTimer = null;
+  mobileLastMsgCount = 0;
+  document.getElementById('mobile-chat').style.display = 'none';
+  document.getElementById('picker').style.display = '';
+  loadProjects();
+}
+
+function mobileToggleMute() {
+  mobileMuted = !mobileMuted;
+  const btn = document.getElementById('mobile-mute');
+  btn.textContent = mobileMuted ? 'MUTED' : 'MUTE';
+  btn.classList.toggle('muted', mobileMuted);
+  if (mobileProject) {
+    fetch(TTS_BASE + '/tts-state', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({project: mobileProject, state: mobileMuted ? 'muted' : 'default'})
+    }).catch(() => {});
+  }
+}

@@ -489,3 +489,101 @@
     position: fixed; top: 0; left: 0; width: 100%; height: 100%;
     z-index: 0; opacity: 0.12; pointer-events: none;
   }
+
+  /* ── Mobile terminal mode ── */
+  body.mobile #layout-btns { display: none; }
+  body.mobile #top-bar { padding: 4px 8px; }
+  body.mobile .tab { min-width: 80px; padding: 0 8px; font-size: 11px; }
+  body.mobile #matrix-bg { display: none; }
+  body.mobile #pane-area { padding-bottom: env(safe-area-inset-bottom, 0); }
+
+  /* ── Mobile Chat UI ── */
+  #mobile-chat {
+    position: fixed; inset: 0; z-index: 100;
+    display: flex; flex-direction: column;
+    background: var(--bg); color: var(--green-dim);
+    font-family: 'Share Tech Mono', monospace;
+  }
+  #mobile-header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 12px 16px; background: rgba(0,255,65,0.03);
+    border-bottom: 1px solid var(--green-dark);
+    padding-top: env(safe-area-inset-top, 12px);
+  }
+  #mobile-back {
+    background: none; border: none; color: var(--green-dim);
+    font-size: 20px; cursor: pointer; padding: 4px 8px;
+  }
+  #mobile-project-name {
+    flex: 1; font-size: 14px; color: var(--green);
+    font-weight: 500; overflow: hidden; text-overflow: ellipsis;
+  }
+  #mobile-mute {
+    background: none; border: 1px solid var(--green-dark);
+    color: var(--green-dim); font-size: 11px; padding: 4px 10px;
+    border-radius: 12px; cursor: pointer;
+  }
+  #mobile-mute.muted { border-color: var(--red); color: var(--red); }
+  #mobile-messages {
+    flex: 1; overflow-y: auto; padding: 12px 16px;
+    display: flex; flex-direction: column; gap: 12px;
+    -webkit-overflow-scrolling: touch;
+  }
+  .msg {
+    max-width: 85%; padding: 10px 14px; border-radius: 16px;
+    font-size: 14px; line-height: 1.5; word-wrap: break-word;
+  }
+  .msg.user {
+    align-self: flex-end; background: var(--green-dark);
+    color: var(--green); border-bottom-right-radius: 4px;
+  }
+  .msg.assistant {
+    align-self: flex-start; background: rgba(0,255,65,0.05);
+    color: var(--green-dim); border-bottom-left-radius: 4px;
+    border: 1px solid rgba(0,255,65,0.1);
+  }
+  .msg.assistant p { margin: 0 0 8px 0; }
+  .msg.assistant p:last-child { margin: 0; }
+  .msg.assistant code {
+    background: rgba(0,255,65,0.1); padding: 1px 5px;
+    border-radius: 3px; font-size: 13px;
+  }
+  .msg.assistant pre {
+    background: rgba(0,0,0,0.5); border: 1px solid var(--green-dark);
+    border-radius: 8px; padding: 10px; overflow-x: auto;
+    font-size: 12px; margin: 6px 0; max-height: 80px;
+    overflow: hidden; position: relative; cursor: pointer;
+  }
+  .msg.assistant pre.expanded { max-height: none; }
+  .msg.assistant pre::after {
+    content: 'tap to expand'; position: absolute; bottom: 0; left: 0; right: 0;
+    text-align: center; font-size: 10px; color: var(--green-dark);
+    background: linear-gradient(transparent, rgba(0,0,0,0.8));
+    padding: 8px 0 4px;
+  }
+  .msg.assistant pre.expanded::after { display: none; }
+  .msg-tool {
+    align-self: flex-start; font-size: 11px; color: var(--text2);
+    padding: 4px 12px; border-left: 2px solid var(--green-dark);
+  }
+  .msg-tool .tool-name { color: var(--cyan); }
+  #mobile-input-bar {
+    display: flex; gap: 8px; padding: 8px 12px;
+    border-top: 1px solid var(--green-dark);
+    background: rgba(0,255,65,0.02);
+    padding-bottom: env(safe-area-inset-bottom, 8px);
+  }
+  #mobile-input {
+    flex: 1; background: rgba(0,255,65,0.05); border: 1px solid var(--green-dark);
+    color: var(--green); font-family: inherit; font-size: 16px;
+    padding: 10px 14px; border-radius: 20px; resize: none;
+    max-height: 120px; outline: none;
+  }
+  #mobile-input:focus { border-color: var(--green-dim); }
+  #mobile-send {
+    background: var(--green-dark); border: 1px solid var(--green-dim);
+    color: var(--green); width: 42px; height: 42px; border-radius: 50%;
+    font-size: 16px; cursor: pointer; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #mobile-send:active { background: var(--green-dim); color: #000; }

@@ -16,6 +16,7 @@ import ssl
 import logging
 import time
 import re
+import threading
 import urllib.request
 from aiohttp import web
 
@@ -81,18 +82,20 @@ ANSI_RE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]|\x1b\].*?\x07|\x1b[()][AB012]|\x1b\
 
 
 class TTSTap:
-    """Accumulates plain text from PTY stream, sends sentences to TTS."""
+    """Accumulates plain text from PTY stream, sends sentences to TTS.
 
-    COOLDOWN = 2.0  # Seconds to ignore PTY output after user submits (echo period)
+    Uses echo matching: tracks what the user typed/pasted via WebSocket,
+    then skips that text when it appears in PTY output (terminal echo).
+    Everything else is Claude's response — speak it.
+    """
 
     def __init__(self, project):
         self.project = project
         self.buffer = ""
         self.in_code_block = False
         self.sentences_sent = set()
-        self.listening = False  # True when we should speak (Claude is responding)
-        self.submit_time = 0  # When user last pressed Enter
-        self.output_after_cooldown = False  # Saw output after cooldown = Claude responding
+        self.echo_pending = ""  # Input text we expect to see echoed back
+        self.lock = threading.Lock()  # Protect echo_pending from concurrent access
 
     def _clean_markdown(self, text):
         text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
@@ -146,32 +149,29 @@ class TTSTap:
         except Exception:
             pass
 
-    def user_submitted(self):
-        """Called when user presses Enter in the terminal."""
-        self.submit_time = time.time()
-        self.listening = False
-        self.output_after_cooldown = False
-        self.buffer = ""
+    def user_input(self, text):
+        """Called from ws_handler with every input the user sends."""
+        with self.lock:
+            self.echo_pending += text
 
     def feed(self, raw_data):
-        """Feed raw PTY data, extract and speak sentences."""
+        """Feed raw PTY data, extract and speak sentences.
+
+        Matches output against stored user input to skip echoes.
+        Anything that isn't an echo is Claude's response — speak it.
+        """
         # Strip ANSI codes
         plain = ANSI_RE.sub('', raw_data)
         if not plain.strip():
             return
 
-        now = time.time()
-
-        # If user just submitted, wait for cooldown (skip echoed input)
-        if self.submit_time > 0 and now - self.submit_time < self.COOLDOWN:
-            return
-
-        # After cooldown, any output = Claude is responding
-        if self.submit_time > 0 and not self.listening:
-            self.listening = True
-
-        if not self.listening:
-            return
+        # --- Echo matching: consume echoed user input ---
+        with self.lock:
+            if self.echo_pending:
+                remaining = self._consume_echo(plain)
+                if not remaining:
+                    return  # Entire chunk was echo
+                plain = remaining
 
         self.buffer += plain
 
@@ -194,6 +194,51 @@ class TTSTap:
                     continue
                 self.sentences_sent.add(key)
                 self._send_to_tts(s)
+
+    def _consume_echo(self, output):
+        """Match output against echo_pending, return any non-echo remainder.
+
+        Must be called while holding self.lock.
+        Handles partial matches — echo may arrive across multiple chunks.
+        """
+        # Normalize: terminals may echo \r\n for \r, collapse whitespace variants
+        out_normalized = output.replace('\r\n', '\n').replace('\r', '\n')
+        echo_normalized = self.echo_pending.replace('\r\n', '\n').replace('\r', '\n')
+
+        # Try to find longest prefix of output that matches echo
+        match_len = 0
+        echo_len = len(echo_normalized)
+        out_len = len(out_normalized)
+
+        # Character-by-character matching (echo may not be exact due to terminal processing)
+        ei = 0  # echo index
+        oi = 0  # output index
+        while ei < echo_len and oi < out_len:
+            if echo_normalized[ei] == out_normalized[oi]:
+                ei += 1
+                oi += 1
+                match_len = oi
+            elif out_normalized[oi] in ' \t\n':
+                # Terminal may insert extra whitespace
+                oi += 1
+            elif echo_normalized[ei] in ' \t\n':
+                # Or skip whitespace in echo
+                ei += 1
+            else:
+                break
+
+        if match_len == 0:
+            # No echo match — this is Claude's output, clear stale echo
+            self.echo_pending = ""
+            return output
+
+        # Consume matched portion from echo_pending
+        self.echo_pending = echo_normalized[ei:]
+
+        # Return non-echo remainder (use original output positions)
+        if match_len >= out_len:
+            return ""  # Entire output was echo
+        return output[match_len:]
 
 
 def start_reader(project_name):
@@ -428,6 +473,74 @@ async def api_sessions(request):
     return web.json_response({"sessions": sessions_list})
 
 
+async def api_conversation(request):
+    """Return the latest conversation messages for mobile chat UI."""
+    name = request.query.get("name", "")
+    project_path = os.path.join(PROJECTS_DIR, name)
+    if not os.path.isdir(project_path):
+        return web.json_response([])
+    claude_proj_key = project_path.replace("\\", "-").replace("/", "-").replace(":", "-")
+    conv_dir = os.path.join(CLAUDE_PROJECTS_DIR, claude_proj_key)
+    if not os.path.isdir(conv_dir):
+        return web.json_response([])
+
+    # Find most recent JSONL
+    latest = None
+    latest_mtime = 0
+    for fname in os.listdir(conv_dir):
+        if not fname.endswith(".jsonl"):
+            continue
+        fpath = os.path.join(conv_dir, fname)
+        mt = os.path.getmtime(fpath)
+        if mt > latest_mtime:
+            latest_mtime = mt
+            latest = fpath
+
+    if not latest:
+        return web.json_response([])
+
+    messages = []
+    try:
+        with open(latest, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                try:
+                    obj = json.loads(line)
+                    entry_type = obj.get("type", "")
+                    if entry_type == "user":
+                        content = obj.get("message", {}).get("content", "")
+                        text = ""
+                        if isinstance(content, list):
+                            for c in content:
+                                if isinstance(c, dict) and c.get("type") == "text":
+                                    text += c["text"] + "\n"
+                        elif isinstance(content, str):
+                            text = content
+                        if text.strip():
+                            messages.append({"role": "user", "text": text.strip()})
+                    elif entry_type == "assistant":
+                        content = obj.get("message", {}).get("content", [])
+                        text = ""
+                        for c in (content if isinstance(content, list) else []):
+                            if isinstance(c, dict):
+                                if c.get("type") == "text":
+                                    text += c["text"] + "\n"
+                                elif c.get("type") == "tool_use":
+                                    messages.append({
+                                        "type": "tool_use",
+                                        "name": c.get("name", ""),
+                                        "summary": ""
+                                    })
+                        if text.strip():
+                            messages.append({"role": "assistant", "text": text.strip()})
+                except:
+                    pass
+    except:
+        pass
+
+    # Return last 50 messages to keep it fast
+    return web.json_response(messages[-50:])
+
+
 async def api_new_project(request):
     """Create a new project folder."""
     data = await request.json()
@@ -560,9 +673,9 @@ async def ws_handler(request):
                     if payload.get("type") == "input":
                         if term and term.is_alive():
                             term.write(payload["data"])
-                            # Signal TTS tap when user presses Enter
-                            if '\r' in payload["data"] and entry.get("tts_tap"):
-                                entry["tts_tap"].user_submitted()
+                            # Track all user input for echo matching
+                            if entry.get("tts_tap"):
+                                entry["tts_tap"].user_input(payload["data"])
                     elif payload.get("type") == "resize":
                         if term and term.is_alive():
                             term.resize(payload["cols"], payload["rows"])
@@ -594,6 +707,7 @@ def main():
     app.router.add_get("/api/projects", api_projects)
     app.router.add_post("/api/kill", api_kill)
     app.router.add_get("/api/sessions", api_sessions)
+    app.router.add_get("/api/conversation", api_conversation)
     app.router.add_post("/api/new-project", api_new_project)
     app.router.add_get("/api/claude-logo", claude_logo)
     app.router.add_get("/ws", ws_handler)

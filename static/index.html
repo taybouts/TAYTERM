@@ -48,6 +48,22 @@
   <div id="pane-area" class="layout-single"></div>
 </div>
 
+<!-- Mobile Chat View (iOS/iPad) -->
+<div id="mobile-chat" style="display:none">
+  <div id="mobile-header">
+    <button id="mobile-back" onclick="mobileShowPicker()">&#9664;</button>
+    <span id="mobile-project-name"></span>
+    <button id="mobile-toggle-view" onclick="mobileToggleView()">TTY</button>
+    <button id="mobile-mute" onclick="mobileToggleMute()"></button>
+  </div>
+  <div id="mobile-messages"></div>
+  <div id="mobile-terminal" style="display:none"></div>
+  <div id="mobile-input-bar">
+    <textarea id="mobile-input" placeholder="Message Claude..." rows="1"></textarea>
+    <button id="mobile-send" onclick="mobileSend()">&#9654;</button>
+  </div>
+</div>
+
 <div id="drop-overlay">DROP FILE</div>
 <div id="snip-overlay"><canvas id="snip-canvas"></canvas><div id="snip-sel"></div></div>
 
