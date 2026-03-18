@@ -88,6 +88,9 @@ class TTSTap:
         self.buffer = ""
         self.in_code_block = False
         self.sentences_sent = set()
+        self.speaking = False  # True when Claude is responding
+        self.last_large_chunk = 0  # Timestamp of last large chunk
+        self.silence_since = 0  # When text stopped flowing
 
     def _clean_markdown(self, text):
         text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
@@ -117,7 +120,7 @@ class TTSTap:
         return False
 
     def _send_to_tts(self, sentence):
-        """Fire-and-forget HTTP call to TTS server."""
+        """Fire-and-forget HTTP call to TTS server. Server checks mute state."""
         try:
             data = json.dumps({"text": sentence, "project": self.project}).encode()
             req = urllib.request.Request(
@@ -133,6 +136,25 @@ class TTSTap:
         # Strip ANSI codes
         plain = ANSI_RE.sub('', raw_data)
         if not plain.strip():
+            return
+
+        now = time.time()
+
+        # Heuristic: user typing = small chunks (1-3 chars), Claude = larger bursts
+        # When we see chunks > 10 chars, Claude is likely responding
+        stripped_len = len(plain.strip())
+        if stripped_len > 10:
+            self.speaking = True
+            self.last_large_chunk = now
+        elif stripped_len <= 3:
+            # Small chunk — likely user typing a character
+            # If no large chunk in the last 2 seconds, we're in user input mode
+            if now - self.last_large_chunk > 2:
+                self.speaking = False
+                self.buffer = ""
+                return
+
+        if not self.speaking:
             return
 
         self.buffer += plain
