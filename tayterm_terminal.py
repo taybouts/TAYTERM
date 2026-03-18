@@ -83,14 +83,16 @@ ANSI_RE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]|\x1b\].*?\x07|\x1b[()][AB012]|\x1b\
 class TTSTap:
     """Accumulates plain text from PTY stream, sends sentences to TTS."""
 
+    COOLDOWN = 2.0  # Seconds to ignore PTY output after user submits (echo period)
+
     def __init__(self, project):
         self.project = project
         self.buffer = ""
         self.in_code_block = False
         self.sentences_sent = set()
-        self.speaking = False  # True when Claude is responding
-        self.last_large_chunk = 0  # Timestamp of last large chunk
-        self.silence_since = 0  # When text stopped flowing
+        self.listening = False  # True when we should speak (Claude is responding)
+        self.submit_time = 0  # When user last pressed Enter
+        self.output_after_cooldown = False  # Saw output after cooldown = Claude responding
 
     def _clean_markdown(self, text):
         text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
@@ -144,6 +146,13 @@ class TTSTap:
         except Exception:
             pass
 
+    def user_submitted(self):
+        """Called when user presses Enter in the terminal."""
+        self.submit_time = time.time()
+        self.listening = False
+        self.output_after_cooldown = False
+        self.buffer = ""
+
     def feed(self, raw_data):
         """Feed raw PTY data, extract and speak sentences."""
         # Strip ANSI codes
@@ -153,21 +162,15 @@ class TTSTap:
 
         now = time.time()
 
-        # Heuristic: user typing = small chunks (1-3 chars), Claude = larger bursts
-        # When we see chunks > 10 chars, Claude is likely responding
-        stripped_len = len(plain.strip())
-        if stripped_len > 10:
-            self.speaking = True
-            self.last_large_chunk = now
-        elif stripped_len <= 3:
-            # Small chunk — likely user typing a character
-            # If no large chunk in the last 2 seconds, we're in user input mode
-            if now - self.last_large_chunk > 2:
-                self.speaking = False
-                self.buffer = ""
-                return
+        # If user just submitted, wait for cooldown (skip echoed input)
+        if self.submit_time > 0 and now - self.submit_time < self.COOLDOWN:
+            return
 
-        if not self.speaking:
+        # After cooldown, any output = Claude is responding
+        if self.submit_time > 0 and not self.listening:
+            self.listening = True
+
+        if not self.listening:
             return
 
         self.buffer += plain
@@ -202,6 +205,7 @@ def start_reader(project_name):
     if project_name.endswith(":claude"):
         proj = project_name.split(":")[0]
         tts_tap = TTSTap(proj)
+        entry["tts_tap"] = tts_tap
 
     async def reader():
         loop = asyncio.get_event_loop()
@@ -556,6 +560,9 @@ async def ws_handler(request):
                     if payload.get("type") == "input":
                         if term and term.is_alive():
                             term.write(payload["data"])
+                            # Signal TTS tap when user presses Enter
+                            if '\r' in payload["data"] and entry.get("tts_tap"):
+                                entry["tts_tap"].user_submitted()
                     elif payload.get("type") == "resize":
                         if term and term.is_alive():
                             term.resize(payload["cols"], payload["rows"])
