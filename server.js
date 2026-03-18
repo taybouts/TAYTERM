@@ -752,6 +752,7 @@ function handleWebSocket(ws, req) {
         }
         env.TERM = 'xterm-256color';
         env.COLORTERM = 'truecolor';
+        env.TERM_PROGRAM = 'xterm';
 
         // Create new PTY
         const ptyProc = pty.spawn('powershell.exe', [], {
@@ -761,6 +762,7 @@ function handleWebSocket(ws, req) {
             cwd: projectPath,
             env,
             useConpty: false,
+            encoding: 'utf8',
         });
 
         entry = { pty: ptyProc, subscribers: new Set(), headlessTerm: null, ttsTap: null };
