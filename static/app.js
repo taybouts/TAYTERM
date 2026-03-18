@@ -393,10 +393,7 @@ function openSession(name, isShell, continueFlag, resumeId) {
     fitAddon.fit();
     if (!isMobile) {
       const dims = fitAddon.proposeDimensions() || { cols: 120, rows: 30 };
-      ws.send(JSON.stringify({ type: 'resize', cols: dims.cols - 1, rows: dims.rows }));
-      setTimeout(() => {
-        ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
-      }, 50);
+      ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
     }
   };
 
