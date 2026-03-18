@@ -1,5 +1,5 @@
 """
-TAYTERM — Web terminal with persistent PTY and multi-device sync.
+TAYTERM - Web terminal with persistent PTY and multi-device sync.
 Port 7777.
 """
 import os
@@ -7,6 +7,11 @@ import sys
 import signal
 import asyncio
 import json
+import importlib
+import ssl as _ssl_mod
+# pip 26+ truststore monkey-patches ssl.SSLContext.wrap_socket and breaks self-signed certs
+if _ssl_mod.SSLContext.wrap_socket.__module__ != 'ssl':
+    importlib.reload(_ssl_mod)
 import ssl
 import logging
 import time
@@ -252,16 +257,16 @@ def get_projects():
     return projects
 
 
-# ══════════════════════════════════════════
+# ==========================================
 #  Static files (served from disk for hot-reload)
-# ══════════════════════════════════════════
+# ==========================================
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
 
-# ══════════════════════════════════════════
+# ==========================================
 #  API Endpoints
-# ══════════════════════════════════════════
+# ==========================================
 
 async def index(request):
     index_path = os.path.join(STATIC_DIR, "index.html")
@@ -450,9 +455,9 @@ async def upload_handler(request):
     return web.json_response({"path": save_path})
 
 
-# ══════════════════════════════════════════
+# ==========================================
 #  WebSocket Handler
-# ══════════════════════════════════════════
+# ==========================================
 
 async def ws_handler(request):
     ws_resp = web.WebSocketResponse()
@@ -532,9 +537,9 @@ async def ws_handler(request):
     return ws_resp
 
 
-# ══════════════════════════════════════════
+# ==========================================
 #  Main
-# ══════════════════════════════════════════
+# ==========================================
 
 def main():
     import argparse
