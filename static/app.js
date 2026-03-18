@@ -483,6 +483,44 @@ function openSession(name, isShell, continueFlag, resumeId) {
     return true;
   });
 
+  // Touch scroll for iOS/iPad with momentum
+  let touchLastY = null, touchVelocity = 0, touchLastTime = 0, momentumId = null;
+  container.addEventListener('touchstart', (e) => {
+    if (e.touches.length === 1) {
+      touchLastY = e.touches[0].clientY;
+      touchLastTime = Date.now();
+      touchVelocity = 0;
+      if (momentumId) { cancelAnimationFrame(momentumId); momentumId = null; }
+    }
+  }, { passive: true });
+  container.addEventListener('touchmove', (e) => {
+    if (touchLastY === null || e.touches.length !== 1) return;
+    const y = e.touches[0].clientY;
+    const now = Date.now();
+    const dt = now - touchLastTime || 1;
+    const dy = touchLastY - y;
+    touchVelocity = dy / dt;
+    const lines = Math.round(dy / 16);
+    if (lines !== 0) term.scrollLines(lines);
+    touchLastY = y;
+    touchLastTime = now;
+  }, { passive: true });
+  container.addEventListener('touchend', () => {
+    touchLastY = null;
+    // iOS UIScrollView.DecelerationRate.normal = 0.998/ms = 0.998^16 ≈ 0.968/frame
+    let v = touchVelocity;
+    let remainder = 0;
+    function momentum() {
+      if (Math.abs(v) < 0.005) return;
+      remainder += v * 16;
+      const lines = Math.trunc(remainder);
+      if (lines !== 0) { term.scrollLines(lines); remainder -= lines; }
+      v *= 0.968;
+      momentumId = requestAnimationFrame(momentum);
+    }
+    momentumId = requestAnimationFrame(momentum);
+  }, { passive: true });
+
   container.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     navigator.clipboard.readText().then(text => {

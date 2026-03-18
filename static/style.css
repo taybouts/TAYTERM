@@ -22,7 +22,9 @@
   ::-webkit-scrollbar-button { display: none; }
 
   /* ── Hide native scrollbar on xterm viewport (v6 custom scrollbar replaces it) ── */
-  .xterm .xterm-viewport { scrollbar-width: none !important; }
+  .xterm { touch-action: pan-y !important; }
+  .xterm .xterm-screen { touch-action: pan-y !important; }
+  .xterm .xterm-viewport { scrollbar-width: none !important; touch-action: pan-y !important; }
   .xterm .xterm-viewport::-webkit-scrollbar { display: none !important; }
 
   /* ── xterm.js v6 scrollbar: thin green pill in 10px right gutter ── */
