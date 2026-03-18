@@ -763,6 +763,7 @@ function handleWebSocket(ws, req) {
             cwd: projectPath,
             env,
             useConpty: false,
+            encoding: 'utf8',
         });
 
         entry = { pty: ptyProc, subscribers: new Set(), headlessTerm: null, ttsTap: null };
