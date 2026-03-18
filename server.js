@@ -153,6 +153,25 @@ class TTSTap {
         if (matchLen >= outNorm.length) return '';
         return output.slice(matchLen);
     }
+
+    feedClean(text) {
+        // Process already-clean text from headless terminal
+        const lines = text.split('\n');
+        for (const line of lines) {
+            if (this._shouldSkip(line)) continue;
+            const cleaned = this._cleanMarkdown(line);
+            if (!cleaned) continue;
+            const parts = cleaned.split(/(?<=[.!?:])(?:\s+|\n)/);
+            for (const sentence of parts) {
+                const s = sentence.trim();
+                if (!s || s.length <= 2) continue;
+                const key = s.slice(0, 60);
+                if (this.sentencesSent.has(key)) continue;
+                this.sentencesSent.add(key);
+                this._sendToTts(s);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -170,15 +189,60 @@ function startReader(sessionKey) {
         entry.ttsTap = ttsTap;
     }
 
-    // Set up headless terminal for buffer
+    // Set up headless terminal for clean text extraction
     const headlessTerm = new HeadlessTerminal({ cols: 120, rows: 30, scrollback: 5000 });
     entry.headlessTerm = headlessTerm;
+    let lastScreenState = '';
+
+    function extractNewText() {
+        try {
+            const buf = headlessTerm._core.buffer;
+            const lines = [];
+            for (let i = 0; i < 30; i++) {
+                const line = buf.lines.get(buf.ybase + i);
+                if (line) lines.push(line.translateToString(true));
+            }
+            const currentState = lines.join('\n');
+            if (currentState !== lastScreenState) {
+                // Find what's new by comparing
+                const oldLines = lastScreenState.split('\n');
+                const newLines = currentState.split('\n');
+                const newText = [];
+                for (let i = 0; i < newLines.length; i++) {
+                    if (i >= oldLines.length || newLines[i] !== oldLines[i]) {
+                        const trimmed = newLines[i].trim();
+                        if (trimmed) newText.push(trimmed);
+                    }
+                }
+                lastScreenState = currentState;
+                if (newText.length > 0) {
+                    const text = newText.join('\n');
+                    // Broadcast clean text to subscribers
+                    for (const ws of entry.subscribers) {
+                        try {
+                            if (ws.readyState === WebSocket.OPEN) {
+                                ws.send(JSON.stringify({ type: 'text', data: text }));
+                            }
+                        } catch (e) { /* ignore */ }
+                    }
+                    return text;
+                }
+            }
+        } catch (e) { /* ignore headless errors */ }
+        return null;
+    }
 
     ptyProc.onData((data) => {
-        // Feed headless terminal
-        headlessTerm.write(data);
+        // Feed headless terminal and extract clean text after write completes
+        headlessTerm.write(data, () => {
+            const cleanText = extractNewText();
+            // Feed clean text to TTS instead of raw data
+            if (cleanText && ttsTap) {
+                try { ttsTap.feedClean(cleanText); } catch (e) { /* ignore */ }
+            }
+        });
 
-        // Broadcast to all WebSocket subscribers
+        // Broadcast raw PTY data to all WebSocket subscribers (for xterm.js on desktop)
         const dead = [];
         for (const ws of entry.subscribers) {
             try {
@@ -193,11 +257,6 @@ function startReader(sessionKey) {
         }
         for (const ws of dead) {
             entry.subscribers.delete(ws);
-        }
-
-        // Feed TTS tap
-        if (ttsTap) {
-            try { ttsTap.feed(data); } catch (e) { /* ignore */ }
         }
     });
 
@@ -752,9 +811,8 @@ function handleWebSocket(ws, req) {
         }
         env.TERM = 'xterm-256color';
         env.COLORTERM = 'truecolor';
-        // Do NOT set TERM_PROGRAM — let Claude Code detect it naturally
 
-        // Create new PTY — use ConPTY (default) for correct true-color support
+        // ConPTY (default) for correct true-color support
         const ptyProc = pty.spawn('powershell.exe', [], {
             name: 'xterm-256color',
             cols: 120,
