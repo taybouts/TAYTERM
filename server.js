@@ -15,6 +15,12 @@ const { Terminal: HeadlessTerminal } = require('@xterm/headless');
 
 // Ignore SIGINT like Python version
 process.on('SIGINT', () => {});
+process.on('uncaughtException', (err) => {
+    console.error(`[CRASH] ${err.message}\n${err.stack}`);
+});
+process.on('unhandledRejection', (err) => {
+    console.error(`[UNHANDLED] ${err}`);
+});
 
 const PROJECTS_DIR = String.raw`C:\Users\taybo\Dropbox\CODEAI`;
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
@@ -330,36 +336,31 @@ function startReader(sessionKey) {
             const text = line.translateToString(true).trim();
             if (!text) return;
 
-            // Log everything for debugging
-            fs.appendFileSync(logFile, `[${outputState}] ${text}\n`);
+            // Skip noise lines — don't change state, don't log
+            if (/^[─━═\-]{3,}/.test(text)) return;
+            if (/^(Opus|Sonnet|Haiku|Claude)\s+\d|bypass permissions|^\d+\/\d+k|^⏵/.test(text)) return;
+            if (/^[✢✻✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏·]|Clauding|Thinking|Crunched|Cogitated|Brewed|Spelunking|Worked for|Noodling|Fiddle/.test(text)) return;
+            if (/^\d+ files? |ctrl\+o to expand|Interrupted|Searched for|alt\+v to paste|Press up to edit/.test(text)) return;
 
             // State transitions based on Claude Code markers
             if (/^[●⦿]/.test(text)) {
-                // Tool header or assistant response marker
-                if (/^[●⦿]\s*(Read|Edit|Write|Bash|Glob|Grep|Agent|Skill|WebSearch|WebFetch|TodoRead|TodoWrite)\(/.test(text)) {
+                if (/^[●⦿]\s*(Read|Edit|Write|Bash|Glob|Grep|Agent|Skill|WebSearch|WebFetch|TodoRead|TodoWrite|Update|Search|Explore|Task|NotebookEdit|ToolSearch|SendMessage)\(/.test(text)) {
                     outputState = 'TOOL';
                 } else {
                     outputState = 'SPEAKING';
-                    // The text after ● is conversation — extract it
                     const spoken = text.replace(/^[●⦿]\s*/, '').trim();
                     if (spoken.length > 5) emitCleanText(spoken);
-                    return;
                 }
-            } else if (/^[✢⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]|Clauding|Thinking|Crunched/.test(text)) {
-                outputState = 'THINKING';
             } else if (/^[⎿╰╭▎│]/.test(text)) {
-                // Tool output — stay in TOOL
                 outputState = 'TOOL';
             } else if (/^❯/.test(text)) {
                 outputState = 'IDLE';
-            } else if (/^(Opus|Sonnet|Haiku|Claude)\s+\d|bypass permissions|^\d+\/\d+k/.test(text)) {
-                outputState = 'STATUS';
-            } else if (/^[─━═\-]{3,}/.test(text)) {
-                // Separator — don't change state
             } else if (outputState === 'SPEAKING') {
-                // We're in speaking state — this is conversation text
                 if (text.length > 5) emitCleanText(text);
             }
+
+            // Log AFTER state change
+            fs.appendFileSync(logFile, `[${outputState}] ${text}\n`);
         } catch (e) { /* ignore */ }
     });
 
@@ -372,7 +373,10 @@ function startReader(sessionKey) {
                 }
             } catch (e) { /* ignore */ }
         }
-        // TTS handled by NaturalVoice stream watcher — don't duplicate
+        // Feed real-time clean text to TTS
+        if (ttsTap) {
+            try { ttsTap.feedClean(text); } catch (e) { /* ignore */ }
+        }
     }
 
     ptyProc.onData((data) => {
