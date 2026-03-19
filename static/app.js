@@ -1221,19 +1221,19 @@ function mobileOpenSession(name, continueFlag) {
   const params = 'project=' + encodeURIComponent(name) + (continueFlag ? '&continue=1' : '&claude=1');
   mobileWs = new WebSocket(proto + '//' + location.host + '/ws?' + params);
 
-  let streamBuffer = '';
-  let streamTimeout = null;
   mobileWs.onmessage = (e) => {
     try {
       const msg = JSON.parse(e.data);
-      if (msg.type === 'output' && msg.data) {
-        streamBuffer += msg.data;
-        clearTimeout(streamTimeout);
-        streamTimeout = setTimeout(() => {
-          mobileAppendStreaming(streamBuffer);
-          streamBuffer = '';
-        }, 100);
+      if (msg.type === 'chat') {
+        // Clean structured message from JSONL watcher
+        if (msg.role === 'assistant' && msg.text) {
+          mobileAddMessage('assistant', msg.text);
+        }
+        // Don't show user messages — we already added them on send
+      } else if (msg.type === 'tool') {
+        mobileAddTool(msg.tools.join(', '), '');
       }
+      // Ignore 'output' messages on mobile — that's raw PTY data for desktop
     } catch(err) {}
   };
 
