@@ -242,10 +242,7 @@ function startReader(sessionKey) {
                                     }
                                 } catch (e) { /* ignore */ }
                             }
-                            // Feed TTS for assistant text messages
-                            if (msg.type === 'chat' && msg.role === 'assistant' && ttsTap) {
-                                try { ttsTap.feedClean(msg.text); } catch (e) { /* ignore */ }
-                            }
+                            // TTS is fed from headless terminal (real-time), not from JSONL (delayed)
                         }
                     } catch (e) { /* skip unparseable lines */ }
                 }
@@ -315,7 +312,73 @@ function startReader(sessionKey) {
         });
     }
 
+    // Headless terminal for real-time clean text extraction (TTS + mobile live)
+    const headlessTerm = new HeadlessTerminal({ cols: 120, rows: 30, scrollback: 100 });
+    entry.headlessTerm = headlessTerm;
+    const logFile = path.join(BASE_DIR, '.headless_log.txt');
+
+    // State machine for Claude Code output
+    let outputState = 'IDLE'; // IDLE, SPEAKING, TOOL, THINKING, STATUS
+
+    headlessTerm.onLineFeed(() => {
+        try {
+            const buf = headlessTerm._core.buffer;
+            const lineIdx = buf.ybase + buf.y - 1;
+            if (lineIdx < 0) return;
+            const line = buf.lines.get(lineIdx);
+            if (!line) return;
+            const text = line.translateToString(true).trim();
+            if (!text) return;
+
+            // Log everything for debugging
+            fs.appendFileSync(logFile, `[${outputState}] ${text}\n`);
+
+            // State transitions based on Claude Code markers
+            if (/^[●⦿]/.test(text)) {
+                // Tool header or assistant response marker
+                if (/^[●⦿]\s*(Read|Edit|Write|Bash|Glob|Grep|Agent|Skill|WebSearch|WebFetch|TodoRead|TodoWrite)\(/.test(text)) {
+                    outputState = 'TOOL';
+                } else {
+                    outputState = 'SPEAKING';
+                    // The text after ● is conversation — extract it
+                    const spoken = text.replace(/^[●⦿]\s*/, '').trim();
+                    if (spoken.length > 5) emitCleanText(spoken);
+                    return;
+                }
+            } else if (/^[✢⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]|Clauding|Thinking|Crunched/.test(text)) {
+                outputState = 'THINKING';
+            } else if (/^[⎿╰╭▎│]/.test(text)) {
+                // Tool output — stay in TOOL
+                outputState = 'TOOL';
+            } else if (/^❯/.test(text)) {
+                outputState = 'IDLE';
+            } else if (/^(Opus|Sonnet|Haiku|Claude)\s+\d|bypass permissions|^\d+\/\d+k/.test(text)) {
+                outputState = 'STATUS';
+            } else if (/^[─━═\-]{3,}/.test(text)) {
+                // Separator — don't change state
+            } else if (outputState === 'SPEAKING') {
+                // We're in speaking state — this is conversation text
+                if (text.length > 5) emitCleanText(text);
+            }
+        } catch (e) { /* ignore */ }
+    });
+
+    function emitCleanText(text) {
+        // Send to WebSocket subscribers as clean text
+        for (const ws of entry.subscribers) {
+            try {
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'text', data: text }));
+                }
+            } catch (e) { /* ignore */ }
+        }
+        // TTS handled by NaturalVoice stream watcher — don't duplicate
+    }
+
     ptyProc.onData((data) => {
+        // Feed headless terminal
+        headlessTerm.write(data);
+
         // Broadcast raw PTY data to all WebSocket subscribers (for xterm.js on desktop)
         const dead = [];
         for (const ws of entry.subscribers) {
