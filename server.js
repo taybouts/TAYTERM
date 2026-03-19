@@ -316,9 +316,6 @@ function startReader(sessionKey) {
     }
 
     ptyProc.onData((data) => {
-        // Feed headless terminal
-        headlessTerm.write(data);
-
         // Broadcast raw PTY data to all WebSocket subscribers (for xterm.js on desktop)
         const dead = [];
         for (const ws of entry.subscribers) {

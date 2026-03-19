@@ -108,10 +108,32 @@ def save_ico():
 #  Server management
 # ==========================================
 
+def kill_port():
+    """Kill any process holding our port."""
+    try:
+        result = subprocess.run(
+            f'netstat -ano | findstr ":{PORT}.*LISTEN"',
+            shell=True, capture_output=True, text=True
+        )
+        for line in result.stdout.strip().split('\n'):
+            parts = line.split()
+            if parts:
+                pid = parts[-1]
+                try:
+                    subprocess.run(f'taskkill /PID {pid} /F', shell=True,
+                                   capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                    log(f"Killed old process on port {PORT} (PID {pid})")
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
 def start_server():
     global server_proc
     if server_proc and server_proc.poll() is None:
         return
+    kill_port()
+    time.sleep(0.5)
     script = os.path.join(BASE_DIR, "server.js")
     server_proc = subprocess.Popen(
         [NODE, script, "--port", str(PORT)],
@@ -207,7 +229,7 @@ LOG_HTML = '''<!DOCTYPE html>
   .btn-red:hover { background: var(--red); color: #000; }
   .btn-green { border-color: var(--green-dark); color: var(--green); }
   .btn-green:hover { background: var(--green); color: #000; }
-  .log-area { flex: 1; padding: 8px 12px; overflow-y: auto; font-size: 11px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; color: var(--green-dim); }
+  .log-area { flex: 1; padding: 8px 12px; overflow-y: auto; font-size: 11px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; color: var(--green-dim); user-select: text; -webkit-user-select: text; cursor: text; }
   .log-area::-webkit-scrollbar { width: 6px; }
   .log-area::-webkit-scrollbar-track { background: #000; }
   .log-area::-webkit-scrollbar-thumb { background: var(--green-dark); }
@@ -250,6 +272,9 @@ async function updateBtns() {
 }
 async function pollLogs() {
   if (!pyApi) return;
+  // Don't update log while user has text selected (would destroy selection)
+  const sel = window.getSelection();
+  if (sel && sel.toString().length > 0) return;
   try {
     const c = await pyApi.get_log_counter();
     if (c !== lastCounter) {
@@ -268,6 +293,27 @@ async function pollLogs() {
 setInterval(pollLogs, 500);
 function init() { pyApi = window.pywebview.api; pollLogs(); updateBtns(); }
 if (window.pywebview) init(); else window.addEventListener('pywebviewready', init);
+
+document.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  const sel = window.getSelection().toString();
+  if (sel) {
+    const ta = document.createElement('textarea');
+    ta.value = sel;
+    ta.style.cssText = 'position:fixed;left:-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+    window.getSelection().removeAllRanges();
+    const msg = document.createElement('div');
+    msg.textContent = 'Copied';
+    msg.style.cssText = 'position:fixed;bottom:10px;right:10px;background:#00ff41;color:#000;padding:4px 12px;font-size:10px;border-radius:3px;z-index:999;opacity:0;transition:opacity 0.2s';
+    document.body.appendChild(msg);
+    requestAnimationFrame(() => msg.style.opacity = '1');
+    setTimeout(() => { msg.style.opacity = '0'; setTimeout(() => msg.remove(), 200); }, 800);
+  }
+});
 </script>
 </body></html>'''
 

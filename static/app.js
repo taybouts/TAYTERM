@@ -206,14 +206,14 @@ function closeResumeModal() {
 
 function pickSession(name, sessionId) {
   const id = name + ':claude';
-  if (sessions[id]) closeTab(id);
+  if (sessions[id]) closeSession(id);
   openSession(name, false, false, sessionId);
 }
 
 function continueSession(name) {
   const id = sessionId(name, false);
   // Close existing dead tab if any
-  if (sessions[id]) closeTab(id);
+  if (sessions[id]) closeSession(id);
   // Open with continue flag
   openSession(name, false, true, null);
 }
@@ -222,7 +222,7 @@ async function killProject(name) {
   await fetch('/api/kill', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name: name})});
   // Close tabs for this project
   for (const id of Object.keys(sessions)) {
-    if (id.startsWith(name + ':')) closeTab(id);
+    if (id.startsWith(name + ':')) closeSession(id);
   }
   loadProjects();
 }
