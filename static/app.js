@@ -1360,6 +1360,8 @@ function mobileAppendStreaming(rawData) {
 }
 
 function mobileSend() {
+  // Stop recording if active
+  if (mobileIsRecording) mobileStopMic();
   const input = document.getElementById('mobile-input');
   const text = input.value.trim();
   if (!text || !mobileWs || mobileWs.readyState !== WebSocket.OPEN) return;
@@ -1406,16 +1408,26 @@ function mobileShowPicker() {
 
 let mobileRecognition = null;
 let mobileIsRecording = false;
+let mobileMicDismissed = false;
+
+function mobileStopMic() {
+  if (mobileRecognition) {
+    mobileMicDismissed = true;
+    mobileRecognition.stop();
+  }
+  mobileIsRecording = false;
+  mobileRecognition = null;
+  document.getElementById('mobile-mic').classList.remove('recording');
+}
 
 function mobileToggleMic() {
-  const btn = document.getElementById('mobile-mic');
   const input = document.getElementById('mobile-input');
 
   if (mobileIsRecording) {
-    // Stop recording
-    if (mobileRecognition) mobileRecognition.stop();
-    mobileIsRecording = false;
-    btn.classList.remove('recording');
+    // Cancel — stop and clear
+    mobileStopMic();
+    input.value = '';
+    input.style.height = 'auto';
     return;
   }
 
@@ -1423,40 +1435,38 @@ function mobileToggleMic() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) { alert('Speech recognition not supported'); return; }
 
+  mobileMicDismissed = false;
   mobileRecognition = new SR();
   mobileRecognition.continuous = true;
   mobileRecognition.interimResults = true;
   mobileRecognition.lang = 'en-US';
 
-  let finalText = input.value;
-
   mobileRecognition.onresult = (e) => {
-    let interim = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      if (e.results[i].isFinal) {
-        finalText += e.results[i][0].transcript + ' ';
-      } else {
-        interim += e.results[i][0].transcript;
-      }
+    if (mobileMicDismissed) return;
+    let text = '';
+    for (let i = 0; i < e.results.length; i++) {
+      text += e.results[i][0].transcript;
     }
-    input.value = finalText + interim;
+    input.value = text;
     input.style.height = 'auto';
     input.style.height = Math.min(input.scrollHeight, 120) + 'px';
   };
 
   mobileRecognition.onend = () => {
     mobileIsRecording = false;
-    btn.classList.remove('recording');
-    input.value = finalText.trim();
+    document.getElementById('mobile-mic').classList.remove('recording');
+    mobileRecognition = null;
   };
 
   mobileRecognition.onerror = () => {
     mobileIsRecording = false;
-    btn.classList.remove('recording');
+    document.getElementById('mobile-mic').classList.remove('recording');
+    mobileRecognition = null;
   };
 
   mobileRecognition.start();
   mobileIsRecording = true;
+  document.getElementById('mobile-mic').classList.add('recording');
   btn.classList.add('recording');
 }
 
