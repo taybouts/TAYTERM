@@ -189,58 +189,135 @@ function startReader(sessionKey) {
         entry.ttsTap = ttsTap;
     }
 
-    // Set up headless terminal for clean text extraction
-    const headlessTerm = new HeadlessTerminal({ cols: 120, rows: 30, scrollback: 5000 });
-    entry.headlessTerm = headlessTerm;
-    let lastScreenState = '';
+    // JSONL file watcher for clean text extraction (mobile + TTS)
+    if (sessionKey.endsWith(':claude')) {
+        const proj = sessionKey.split(':')[0];
+        const projectPath = path.join(PROJECTS_DIR, proj);
+        const claudeProjKey = projectPath.replace(/\\/g, '-').replace(/\//g, '-').replace(/:/g, '-');
+        const convDir = path.join(CLAUDE_PROJECTS_DIR, claudeProjKey);
 
-    function extractNewText() {
-        try {
-            const buf = headlessTerm._core.buffer;
-            const lines = [];
-            for (let i = 0; i < 30; i++) {
-                const line = buf.lines.get(buf.ybase + i);
-                if (line) lines.push(line.translateToString(true));
-            }
-            const currentState = lines.join('\n');
-            if (currentState !== lastScreenState) {
-                // Find what's new by comparing
-                const oldLines = lastScreenState.split('\n');
-                const newLines = currentState.split('\n');
-                const newText = [];
-                for (let i = 0; i < newLines.length; i++) {
-                    if (i >= oldLines.length || newLines[i] !== oldLines[i]) {
-                        const trimmed = newLines[i].trim();
-                        if (trimmed) newText.push(trimmed);
-                    }
+        // Find and watch the latest JSONL file
+        let jsonlWatcher = null;
+        let jsonlPos = 0;
+        let jsonlPath = null;
+
+        function findLatestJsonl() {
+            try {
+                if (!fs.existsSync(convDir)) return null;
+                const files = fs.readdirSync(convDir).filter(f => f.endsWith('.jsonl'));
+                if (files.length === 0) return null;
+                let latest = null, latestMtime = 0;
+                for (const f of files) {
+                    const fp = path.join(convDir, f);
+                    const mt = fs.statSync(fp).mtimeMs;
+                    if (mt > latestMtime) { latestMtime = mt; latest = fp; }
                 }
-                lastScreenState = currentState;
-                if (newText.length > 0) {
-                    const text = newText.join('\n');
-                    // Broadcast clean text to subscribers
-                    for (const ws of entry.subscribers) {
-                        try {
-                            if (ws.readyState === WebSocket.OPEN) {
-                                ws.send(JSON.stringify({ type: 'text', data: text }));
+                return latest;
+            } catch (e) { return null; }
+        }
+
+        function readNewLines() {
+            if (!jsonlPath || !fs.existsSync(jsonlPath)) return;
+            try {
+                const stat = fs.statSync(jsonlPath);
+                if (stat.size <= jsonlPos) return;
+                const fd = fs.openSync(jsonlPath, 'r');
+                const buf = Buffer.alloc(stat.size - jsonlPos);
+                fs.readSync(fd, buf, 0, buf.length, jsonlPos);
+                fs.closeSync(fd);
+                jsonlPos = stat.size;
+
+                const newData = buf.toString('utf-8');
+                const lines = newData.split('\n').filter(l => l.trim());
+                for (const line of lines) {
+                    try {
+                        const obj = JSON.parse(line);
+                        const msg = parseJsonlEntry(obj);
+                        if (msg) {
+                            // Broadcast to WebSocket subscribers
+                            for (const ws of entry.subscribers) {
+                                try {
+                                    if (ws.readyState === WebSocket.OPEN) {
+                                        ws.send(JSON.stringify(msg));
+                                    }
+                                } catch (e) { /* ignore */ }
                             }
-                        } catch (e) { /* ignore */ }
-                    }
-                    return text;
+                            // Feed TTS for assistant text messages
+                            if (msg.type === 'chat' && msg.role === 'assistant' && ttsTap) {
+                                try { ttsTap.feedClean(msg.text); } catch (e) { /* ignore */ }
+                            }
+                        }
+                    } catch (e) { /* skip unparseable lines */ }
                 }
+            } catch (e) { /* ignore read errors */ }
+        }
+
+        function parseJsonlEntry(obj) {
+            const entryType = obj.type;
+            if (entryType === 'user') {
+                const content = obj.message?.content;
+                let text = '';
+                if (Array.isArray(content)) {
+                    for (const c of content) {
+                        if (c.type === 'text') text += c.text;
+                    }
+                } else if (typeof content === 'string') {
+                    text = content;
+                }
+                if (text.trim()) return { type: 'chat', role: 'user', text: text.trim() };
+            } else if (entryType === 'assistant') {
+                const content = obj.message?.content;
+                if (!Array.isArray(content)) return null;
+                let text = '';
+                const tools = [];
+                for (const c of content) {
+                    if (c.type === 'text') text += c.text;
+                    else if (c.type === 'tool_use') tools.push(c.name);
+                }
+                if (text.trim()) return { type: 'chat', role: 'assistant', text: text.trim() };
+                if (tools.length > 0) return { type: 'tool', tools };
             }
-        } catch (e) { /* ignore headless errors */ }
-        return null;
+            return null;
+        }
+
+        // Start watching after a short delay (let Claude start first)
+        setTimeout(() => {
+            jsonlPath = findLatestJsonl();
+            if (jsonlPath) {
+                // Start at end of file (don't replay history)
+                jsonlPos = fs.statSync(jsonlPath).size;
+                log(`Watching JSONL: ${jsonlPath}`);
+
+                // Watch for changes
+                jsonlWatcher = fs.watch(jsonlPath, () => readNewLines());
+
+                // Also poll periodically in case fs.watch misses events
+                entry._jsonlInterval = setInterval(() => {
+                    // Check if a newer JSONL appeared
+                    const latest = findLatestJsonl();
+                    if (latest && latest !== jsonlPath) {
+                        jsonlPath = latest;
+                        jsonlPos = 0;
+                        if (jsonlWatcher) jsonlWatcher.close();
+                        jsonlWatcher = fs.watch(jsonlPath, () => readNewLines());
+                        log(`Switched JSONL: ${jsonlPath}`);
+                    }
+                    readNewLines();
+                }, 1000);
+            }
+        }, 3000);
+
+        // Cleanup on PTY exit
+        const origOnExit = ptyProc.onExit;
+        ptyProc.onExit(() => {
+            if (jsonlWatcher) jsonlWatcher.close();
+            if (entry._jsonlInterval) clearInterval(entry._jsonlInterval);
+        });
     }
 
     ptyProc.onData((data) => {
-        // Feed headless terminal and extract clean text after write completes
-        headlessTerm.write(data, () => {
-            const cleanText = extractNewText();
-            // Feed clean text to TTS instead of raw data
-            if (cleanText && ttsTap) {
-                try { ttsTap.feedClean(cleanText); } catch (e) { /* ignore */ }
-            }
-        });
+        // Feed headless terminal
+        headlessTerm.write(data);
 
         // Broadcast raw PTY data to all WebSocket subscribers (for xterm.js on desktop)
         const dead = [];
@@ -828,16 +905,18 @@ function handleWebSocket(ws, req) {
         log(`New PTY: ${sessionKey} — ${remoteAddr}`);
         ws.send(JSON.stringify({ type: 'status', data: `new ${sessionType} PTY started` }));
 
-        // Launch claude if requested (after short delay for shell to init)
+        // Launch claude if requested (after delay for PowerShell to fully init)
         if (autoClaude || continueClaude || resumeId) {
             let cmd = CLAUDE_CMD;
             if (continueClaude) cmd += ' --continue';
             else if (resumeId) cmd += ' --resume ' + resumeId;
+            log(`Will launch: ${cmd}`);
             setTimeout(() => {
                 if (entry.pty) {
+                    log(`Sending to PTY: ${cmd}`);
                     entry.pty.write(cmd + '\r');
                 }
-            }, 500);
+            }, 1500);
         }
     }
 

@@ -1039,8 +1039,7 @@ document.addEventListener('drop', (e) => {
       b.classList.toggle('active', b.dataset.layout === layout);
     });
     for (const tab of saved.tabs) {
-      const isActive = saved.active && tab.name === saved.active;
-      openSession(tab.name, tab.isShell || false, !tab.isShell && isActive);
+      openSession(tab.name, tab.isShell || false, !tab.isShell);
       // Restore mute state
       const sid = tab.name + (tab.isShell ? ':shell' : ':claude');
       if (sessions[sid] && tab.muted) {
@@ -1061,30 +1060,8 @@ document.addEventListener('drop', (e) => {
 })();
 
 // ══════════════════════════════════════════
-//  TTS speaking indicator
+//  TTS speaking indicator (TODO: replace with push from TTS server)
 // ══════════════════════════════════════════
-setInterval(async () => {
-  try {
-    const resp = await fetch(TTS_BASE + '/status');
-    const data = await resp.json();
-    const speaking = data.speaking_project;
-    document.querySelectorAll('.tab').forEach(tab => {
-      tab.classList.remove('speaking');
-    });
-    if (speaking) {
-      for (const [id, s] of Object.entries(sessions)) {
-        if (s.name === speaking) {
-          const tabs = document.querySelectorAll('.tab');
-          tabs.forEach(t => {
-            if (t.querySelector('.tab-name') && t.querySelector('.tab-name').textContent === s.name) {
-              t.classList.add('speaking');
-            }
-          });
-        }
-      }
-    }
-  } catch(e) {}
-}, 500);
 
 // ══════════════════════════════════════════
 //  Settings & Matrix Rain
