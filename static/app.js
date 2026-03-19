@@ -1404,6 +1404,62 @@ function mobileShowPicker() {
   loadProjects();
 }
 
+let mobileRecognition = null;
+let mobileIsRecording = false;
+
+function mobileToggleMic() {
+  const btn = document.getElementById('mobile-mic');
+  const input = document.getElementById('mobile-input');
+
+  if (mobileIsRecording) {
+    // Stop recording
+    if (mobileRecognition) mobileRecognition.stop();
+    mobileIsRecording = false;
+    btn.classList.remove('recording');
+    return;
+  }
+
+  // Start recording
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { alert('Speech recognition not supported'); return; }
+
+  mobileRecognition = new SR();
+  mobileRecognition.continuous = true;
+  mobileRecognition.interimResults = true;
+  mobileRecognition.lang = 'en-US';
+
+  let finalText = input.value;
+
+  mobileRecognition.onresult = (e) => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      if (e.results[i].isFinal) {
+        finalText += e.results[i][0].transcript + ' ';
+      } else {
+        interim += e.results[i][0].transcript;
+      }
+    }
+    input.value = finalText + interim;
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+  };
+
+  mobileRecognition.onend = () => {
+    mobileIsRecording = false;
+    btn.classList.remove('recording');
+    input.value = finalText.trim();
+  };
+
+  mobileRecognition.onerror = () => {
+    mobileIsRecording = false;
+    btn.classList.remove('recording');
+  };
+
+  mobileRecognition.start();
+  mobileIsRecording = true;
+  btn.classList.add('recording');
+}
+
 function mobileToggleMute() {
   mobileMuted = !mobileMuted;
   const btn = document.getElementById('mobile-mute');

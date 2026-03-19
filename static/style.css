@@ -580,6 +580,20 @@
     max-height: 120px; outline: none;
   }
   #mobile-input:focus { border-color: var(--green-dim); }
+  #mobile-mic {
+    background: var(--green-dark); border: 1px solid var(--green-dim);
+    color: var(--green); width: 42px; height: 42px; border-radius: 50%;
+    cursor: pointer; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #mobile-mic.recording {
+    background: var(--red); border-color: var(--red);
+    color: #fff; animation: mic-pulse 1s ease-in-out infinite;
+  }
+  @keyframes mic-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(255,0,64,0.4); }
+    50% { box-shadow: 0 0 0 10px rgba(255,0,64,0); }
+  }
   #mobile-send {
     background: var(--green-dark); border: 1px solid var(--green-dim);
     color: var(--green); width: 42px; height: 42px; border-radius: 50%;
