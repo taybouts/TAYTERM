@@ -1193,6 +1193,8 @@ window.addEventListener('resize', () => {
 let mobileWs = null;
 let mobileProject = null;
 let mobileMuted = false;
+let mobileTerm = null;
+let mobileTermView = false;
 let mobileLastMsgCount = 0;
 let mobilePollTimer = null;
 
@@ -1216,26 +1218,35 @@ function mobileOpenSession(name, continueFlag) {
   // Load conversation history from JSONL
   mobileLoadHistory(name);
 
-  // Connect WebSocket — live PTY stream
+  // Connect WebSocket with auto-reconnect
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const params = 'project=' + encodeURIComponent(name) + (continueFlag ? '&continue=1' : '&claude=1');
-  mobileWs = new WebSocket(proto + '//' + location.host + '/ws?' + params);
+  const wsUrl = proto + '//' + location.host + '/ws?project=' + encodeURIComponent(name) + '&claude=1';
 
-  mobileWs.onmessage = (e) => {
-    try {
-      const msg = JSON.parse(e.data);
-      if (msg.type === 'chat') {
-        // Clean structured message from JSONL watcher
-        if (msg.role === 'assistant' && msg.text) {
-          mobileAddMessage('assistant', msg.text);
+  function mobileConnect() {
+    mobileWs = new WebSocket(wsUrl);
+    mobileWs.onopen = () => {
+      document.getElementById('mobile-project-name').textContent = mobileProject;
+    };
+    mobileWs.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'chat') {
+          if (msg.role === 'assistant' && msg.text) {
+            mobileAddMessage('assistant', msg.text);
+          }
+        } else if (msg.type === 'output' && mobileTerm) {
+          mobileTerm.write(msg.data);
         }
-        // Don't show user messages — we already added them on send
-      } else if (msg.type === 'tool') {
-        mobileAddTool(msg.tools.join(', '), '');
+      } catch(err) {}
+    };
+    mobileWs.onclose = () => {
+      if (mobileProject) {
+        document.getElementById('mobile-project-name').textContent = mobileProject + ' (reconnecting...)';
+        setTimeout(mobileConnect, 2000);
       }
-      // Ignore 'output' messages on mobile — that's raw PTY data for desktop
-    } catch(err) {}
-  };
+    };
+  }
+  mobileConnect();
 
   // Auto-grow textarea
   const input = document.getElementById('mobile-input');
@@ -1250,7 +1261,7 @@ function mobileOpenSession(name, continueFlag) {
       mobileSend();
     }
   });
-  input.focus();
+  // Don't auto-focus input on mobile — prevents keyboard from popping up on load
 }
 
 async function mobileLoadHistory(name) {
@@ -1374,7 +1385,11 @@ function mobileSend() {
 function mobileSendText() {
   const input = document.getElementById('mobile-input');
   const text = input.value.trim();
-  if (!text || !mobileWs || mobileWs.readyState !== WebSocket.OPEN) return;
+  if (!text) return;
+  if (!mobileWs || mobileWs.readyState !== WebSocket.OPEN) {
+    document.getElementById('mobile-project-name').textContent = mobileProject + ' (disconnected)';
+    return;
+  }
   mobileAddMessage('user', text);
   mobileStreamDiv = null;
   mobileWs.send(JSON.stringify({ type: 'input', data: text + '\r' }));
@@ -1478,6 +1493,45 @@ function mobileToggleMic() {
   mobileIsRecording = true;
   document.getElementById('mobile-mic').classList.add('recording');
   btn.classList.add('recording');
+}
+
+function mobileToggleView() {
+  const messages = document.getElementById('mobile-messages');
+  const termDiv = document.getElementById('mobile-terminal');
+  const btn = document.getElementById('mobile-toggle-view');
+
+  mobileTermView = !mobileTermView;
+
+  if (mobileTermView) {
+    // Switch to terminal view
+    messages.style.display = 'none';
+    termDiv.style.display = 'block';
+    btn.textContent = 'CHAT';
+
+    if (!mobileTerm) {
+      mobileTerm = new Terminal({
+        cursorBlink: true,
+        scrollback: 1000,
+        fontSize: 11,
+        fontFamily: '"Fira Code", monospace',
+        fontWeight: '300',
+        theme: {
+          background: '#000',
+          foreground: '#ececec',
+        },
+      });
+      const fitAddon = new FitAddon.FitAddon();
+      mobileTerm.loadAddon(fitAddon);
+      mobileTerm.open(termDiv);
+      setTimeout(() => fitAddon.fit(), 100);
+      // Don't send resize — let desktop control PTY size
+    }
+  } else {
+    // Switch to chat view
+    messages.style.display = 'flex';
+    termDiv.style.display = 'none';
+    btn.textContent = 'TTY';
+  }
 }
 
 function mobileToggleMute() {

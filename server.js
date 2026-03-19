@@ -549,6 +549,9 @@ function handleStatic(req, res, filename) {
             '.css': 'text/css',
             '.js': 'application/javascript',
             '.html': 'text/html',
+            '.json': 'application/json',
+            '.png': 'image/png',
+            '.ico': 'image/x-icon',
         };
         const ct = contentTypes[ext] || 'application/octet-stream';
         res.writeHead(200, { 'Content-Type': ct, 'Cache-Control': 'no-store' });
