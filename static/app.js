@@ -1360,13 +1360,23 @@ function mobileAppendStreaming(rawData) {
 }
 
 function mobileSend() {
-  // Stop recording if active
-  if (mobileIsRecording) mobileStopMic();
+  const input = document.getElementById('mobile-input');
+  // Stop recording first and wait a moment for final result
+  if (mobileIsRecording) {
+    mobileStopMic();
+    // Delay send slightly to let final recognition result land
+    setTimeout(() => mobileSendText(), 300);
+    return;
+  }
+  mobileSendText();
+}
+
+function mobileSendText() {
   const input = document.getElementById('mobile-input');
   const text = input.value.trim();
   if (!text || !mobileWs || mobileWs.readyState !== WebSocket.OPEN) return;
   mobileAddMessage('user', text);
-  mobileStreamDiv = null;  // Next output starts a new assistant bubble
+  mobileStreamDiv = null;
   mobileWs.send(JSON.stringify({ type: 'input', data: text + '\r' }));
   input.value = '';
   input.style.height = 'auto';
