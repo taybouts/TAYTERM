@@ -525,7 +525,7 @@
   }
   #mobile-mute.muted { border-color: var(--red); color: var(--red); }
   #mobile-terminal {
-    flex: 1; overflow: hidden;
+    flex: 1; overflow: hidden; min-height: 0; position: relative;
   }
   #mobile-toggle-view {
     background: none; border: 1px solid var(--green-dark);

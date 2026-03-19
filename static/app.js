@@ -1520,11 +1520,77 @@ function mobileToggleView() {
           foreground: '#ececec',
         },
       });
-      const fitAddon = new FitAddon.FitAddon();
-      mobileTerm.loadAddon(fitAddon);
+      const mFitAddon = new FitAddon.FitAddon();
+      mobileTerm.loadAddon(mFitAddon);
       mobileTerm.open(termDiv);
-      setTimeout(() => fitAddon.fit(), 100);
+      // No WebGL on mobile — canvas renderer only
+      // Touch scroll for mobile terminal
+      let tLastY = null, tVelocity = 0, tLastTime = 0, tMomentumId = null;
+      termDiv.addEventListener('touchstart', (e) => {
+        if (e.touches.length === 1) {
+          tLastY = e.touches[0].clientY;
+          tLastTime = Date.now();
+          tVelocity = 0;
+          if (tMomentumId) { cancelAnimationFrame(tMomentumId); tMomentumId = null; }
+        }
+      }, { passive: true });
+      termDiv.addEventListener('touchmove', (e) => {
+        if (tLastY === null || e.touches.length !== 1) return;
+        const y = e.touches[0].clientY;
+        const now = Date.now();
+        const dt = now - tLastTime || 1;
+        const dy = tLastY - y;
+        tVelocity = dy / dt;
+        const lines = Math.round(dy / 16);
+        if (lines !== 0) mobileTerm.scrollLines(lines);
+        tLastY = y;
+        tLastTime = now;
+      }, { passive: true });
+      termDiv.addEventListener('touchend', () => {
+        tLastY = null;
+        let v = tVelocity;
+        let remainder = 0;
+        function momentum() {
+          if (Math.abs(v) < 0.005) return;
+          remainder += v * 16;
+          const lines = Math.trunc(remainder);
+          if (lines !== 0) { mobileTerm.scrollLines(lines); remainder -= lines; }
+          v *= 0.968;
+          tMomentumId = requestAnimationFrame(momentum);
+        }
+        tMomentumId = requestAnimationFrame(momentum);
+      }, { passive: true });
+      // Pinch to zoom — change font size
+      let pinchStartDist = 0;
+      let pinchStartSize = 11;
+      termDiv.addEventListener('touchstart', (e) => {
+        if (e.touches.length === 2) {
+          const dx = e.touches[0].clientX - e.touches[1].clientX;
+          const dy = e.touches[0].clientY - e.touches[1].clientY;
+          pinchStartDist = Math.sqrt(dx * dx + dy * dy);
+          pinchStartSize = mobileTerm.options.fontSize;
+        }
+      }, { passive: true });
+      termDiv.addEventListener('touchmove', (e) => {
+        if (e.touches.length === 2 && pinchStartDist > 0) {
+          const dx = e.touches[0].clientX - e.touches[1].clientX;
+          const dy = e.touches[0].clientY - e.touches[1].clientY;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          const scale = dist / pinchStartDist;
+          const newSize = Math.round(Math.min(24, Math.max(6, pinchStartSize * scale)));
+          if (newSize !== mobileTerm.options.fontSize) {
+            mobileTerm.options.fontSize = newSize;
+            mFitAddon.fit();
+          }
+        }
+      }, { passive: true });
+      termDiv.addEventListener('touchend', () => { pinchStartDist = 0; }, { passive: true });
+      // Fit after render
+      setTimeout(() => mFitAddon.fit(), 200);
       // Don't send resize — let desktop control PTY size
+    } else {
+      // Re-fit existing terminal
+      setTimeout(() => mobileTerm.element && mobileTerm.refresh(0, mobileTerm.rows - 1), 100);
     }
   } else {
     // Switch to chat view
