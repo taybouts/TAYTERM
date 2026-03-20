@@ -202,11 +202,11 @@ class TTSTap {
 
     feedClean(text) {
         // Process already-clean text from headless terminal
+        // No _shouldSkip — headless state machine already filtered noise
         const lines = text.split('\n');
         for (const line of lines) {
-            if (this._shouldSkip(line)) continue;
             const cleaned = this._cleanMarkdown(line);
-            if (!cleaned) continue;
+            if (!cleaned || cleaned.length <= 3) continue;
             const parts = cleaned.split(/(?<=[.!?:])(?:\s+|\n)/);
             for (const sentence of parts) {
                 const s = sentence.trim();
@@ -365,6 +365,8 @@ function startReader(sessionKey) {
 
     // State machine for Claude Code output
     let outputState = 'IDLE'; // IDLE, SPEAKING, TOOL, THINKING, STATUS
+    const startTime = Date.now();
+    const WARMUP_MS = 5000; // Skip TTS for first 5 seconds (screen replay)
 
     headlessTerm.onLineFeed(() => {
         try {
@@ -415,8 +417,8 @@ function startReader(sessionKey) {
                 }
             } catch (e) { /* ignore */ }
         }
-        // Feed real-time clean text to TTS
-        if (ttsTap) {
+        // Feed real-time clean text to TTS (skip warmup period to avoid replaying screen)
+        if (ttsTap && (Date.now() - startTime > WARMUP_MS)) {
             try { ttsTap.feedClean(text); } catch (e) { /* ignore */ }
         }
     }
