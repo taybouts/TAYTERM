@@ -714,7 +714,7 @@ body::after {
   border:1px solid transparent;
   border-radius:0;
   min-width:0; min-height:0;
-  position:relative; overflow:hidden;
+  position:relative;
   padding:4px;
 }
 .pane.focused { border-color:rgba(56,189,248,0.15); }
