@@ -456,7 +456,7 @@ function openSession(name, isShell, continueFlag, resumeId) {
     drawBoldTextInBrightColors: true,
     overviewRuler: { width: 10 },
     theme: {
-      background: 'rgba(10,10,15,0.5)',
+      background: '#000000',
       foreground: '#ececec',
       black: '#000000',
       red: '#ff0000',

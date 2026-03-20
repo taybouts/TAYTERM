@@ -388,6 +388,7 @@ function startReader(sessionKey) {
             // State transitions based on Claude Code markers
             if (/^[●⦿]/.test(text)) {
                 if (/^[●⦿]\s*(Read|Edit|Write|Bash|Glob|Grep|Agent|Skill|WebSearch|WebFetch|TodoRead|TodoWrite|Update|Search|Explore|Task|NotebookEdit|ToolSearch|SendMessage)\(/.test(text)) {
+                    flushTtsBuffer(); // Flush speech before tool starts
                     outputState = 'TOOL';
                 } else {
                     outputState = 'SPEAKING';
@@ -395,8 +396,10 @@ function startReader(sessionKey) {
                     if (spoken.length > 5) emitCleanText(spoken);
                 }
             } else if (/^[⎿╰╭▎│]/.test(text)) {
+                flushTtsBuffer(); // Flush speech before tool output
                 outputState = 'TOOL';
             } else if (/^❯/.test(text)) {
+                flushTtsBuffer(); // Flush speech before user input
                 const userInput = text.replace(/^❯\s*/, '').trim();
                 if (userInput.length > 0) outputState = 'IDLE';
             } else if (outputState === 'SPEAKING') {
@@ -408,8 +411,17 @@ function startReader(sessionKey) {
         } catch (e) { /* ignore */ }
     });
 
+    let ttsBuffer = '';
+    let ttsFlushTimer = null;
+
+    function flushTtsBuffer() {
+        if (!ttsBuffer.trim() || !ttsTap) return;
+        try { ttsTap.feedClean(ttsBuffer.trim()); } catch (e) { /* ignore */ }
+        ttsBuffer = '';
+    }
+
     function emitCleanText(text) {
-        // Send to WebSocket subscribers as clean text
+        // Send to WebSocket subscribers as clean text (immediate)
         for (const ws of entry.subscribers) {
             try {
                 if (ws.readyState === WebSocket.OPEN) {
@@ -417,9 +429,11 @@ function startReader(sessionKey) {
                 }
             } catch (e) { /* ignore */ }
         }
-        // Feed real-time clean text to TTS (skip warmup period to avoid replaying screen)
+        // Accumulate for TTS — flush after 300ms pause (skip warmup)
         if (ttsTap && (Date.now() - startTime > WARMUP_MS)) {
-            try { ttsTap.feedClean(text); } catch (e) { /* ignore */ }
+            ttsBuffer += ' ' + text;
+            clearTimeout(ttsFlushTimer);
+            ttsFlushTimer = setTimeout(flushTtsBuffer, 300);
         }
     }
 
