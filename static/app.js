@@ -456,7 +456,7 @@ function openSession(name, isShell, continueFlag, resumeId) {
     drawBoldTextInBrightColors: true,
     overviewRuler: { width: 10 },
     theme: {
-      background: '#000',
+      background: 'rgba(0,0,0,0)',
       foreground: '#ececec',
       black: '#000000',
       red: '#ff0000',
@@ -829,6 +829,52 @@ function setLayout(newLayout) {
   saveState();
 }
 
+function createPane(i, isMultiPane) {
+  const pane = document.createElement('div');
+  pane.className = 'pane' + (isMultiPane && i === selectedPane ? ' selected' : '');
+
+  const sid = paneSlots[i];
+  if (sid && sessions[sid]) {
+    const s = sessions[sid];
+    if (isMultiPane) {
+      const label = document.createElement('div');
+      label.className = 'pane-label';
+      if (s.isShell) {
+        label.innerHTML = s.name.toUpperCase() + ' <span style="color:var(--cyan);font-weight:700">SHELL</span>';
+      } else {
+        label.textContent = s.name.toUpperCase();
+      }
+      pane.appendChild(label);
+    }
+    s.container.style.display = 'block';
+    s.container.style.width = '100%';
+    s.container.style.height = '100%';
+    pane.appendChild(s.container);
+    const paneIdx = i;
+    pane.onclick = () => {
+      selectedPane = paneIdx;
+      activeSessionId = sid;
+      document.querySelectorAll('.pane').forEach((p, j) => {
+        p.classList.remove('selected');
+        if (j === selectedPane && isMultiPane) p.classList.add('selected');
+      });
+      renderTabs();
+      sessions[sid].term.focus();
+    };
+    setTimeout(() => s.fitAddon.fit(), 50);
+  } else if (isMultiPane) {
+    const paneIdx = i;
+    pane.onclick = () => {
+      selectedPane = paneIdx;
+      document.querySelectorAll('.pane').forEach((p, j) => {
+        p.classList.remove('selected');
+        if (j === selectedPane) p.classList.add('selected');
+      });
+    };
+  }
+  return pane;
+}
+
 function renderPanes() {
   const area = document.getElementById('pane-area');
   area.className = 'pane-area layout-' + layout;
@@ -839,64 +885,31 @@ function renderPanes() {
   while (paneSlots.length < paneCount) paneSlots.push(null);
   if (selectedPane >= paneCount) selectedPane = 0;
 
-  for (let i = 0; i < paneCount; i++) {
-    const pane = document.createElement('div');
-    // Only show border highlights in multi-pane mode
-    if (isMultiPane) {
-      pane.className = 'pane' + (i === selectedPane ? ' selected' : '');
-    } else {
-      pane.className = 'pane';
+  if (layout === 'triple') {
+    // Left pane + right column with 2 stacked panes
+    area.appendChild(createPane(0, true));
+    const rightCol = document.createElement('div');
+    rightCol.className = 'pane-right-col';
+    rightCol.appendChild(createPane(1, true));
+    rightCol.appendChild(createPane(2, true));
+    area.appendChild(rightCol);
+  } else if (layout === 'quad') {
+    // 2 rows, 2 panes each
+    const row1 = document.createElement('div');
+    row1.className = 'pane-row';
+    row1.appendChild(createPane(0, true));
+    row1.appendChild(createPane(1, true));
+    area.appendChild(row1);
+    const row2 = document.createElement('div');
+    row2.className = 'pane-row';
+    row2.appendChild(createPane(2, true));
+    row2.appendChild(createPane(3, true));
+    area.appendChild(row2);
+  } else {
+    for (let i = 0; i < paneCount; i++) {
+      area.appendChild(createPane(i, isMultiPane));
     }
-
-    const sid = paneSlots[i];
-    if (sid && sessions[sid]) {
-      const s = sessions[sid];
-      // Only show pane label in multi-pane mode
-      if (isMultiPane) {
-        const label = document.createElement('div');
-        label.className = 'pane-label';
-        if (s.isShell) {
-          label.innerHTML = s.name.toUpperCase() + ' <span style="color:var(--cyan);font-weight:700">SHELL</span>';
-        } else {
-          label.textContent = s.name.toUpperCase();
-        }
-        pane.appendChild(label);
-      }
-
-      s.container.style.display = 'block';
-      s.container.style.width = '100%';
-      s.container.style.height = '100%';
-      pane.appendChild(s.container);
-
-      const paneIdx = i;
-      pane.onclick = () => {
-        selectedPane = paneIdx;
-        activeSessionId = sid;
-        document.querySelectorAll('.pane').forEach((p, j) => {
-          p.classList.remove('selected');
-          if (j === selectedPane && isMultiPane) p.classList.add('selected');
-        });
-        renderTabs();
-        sessions[sid].term.focus();
-      };
-
-      // Fit after render — single fit, no refresh (WebGL handles repaints)
-      setTimeout(() => s.fitAddon.fit(), 50);
-    } else if (isMultiPane) {
-      // Empty pane — clickable to select it
-      const paneIdx = i;
-      pane.onclick = () => {
-        selectedPane = paneIdx;
-        document.querySelectorAll('.pane').forEach((p, j) => {
-          p.classList.remove('selected');
-          if (j === selectedPane) p.classList.add('selected');
-        });
-      };
-    }
-
-    area.appendChild(pane);
   }
-
 }
 
 // ══════════════════════════════════════════
