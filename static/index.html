@@ -103,30 +103,55 @@
 </div><!-- end picker -->
 
 <!-- Terminal View -->
-<div id="terminal-view">
-  <div id="top-bar">
-    <button id="back-btn" onclick="showPicker()">
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+<div class="terminal-view" id="terminal-view">
+  <div class="top-bar" id="top-bar">
+    <button class="btn-back" id="back-btn" onclick="showPicker()" title="Back to projects">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
     </button>
-    <div id="tab-strip"></div>
-    <div id="layout-btns">
-      <button class="layout-btn active" data-layout="single" onclick="setLayout('single')"><svg width="14" height="12" viewBox="0 0 14 12"><rect x="1" y="1" width="12" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></button>
-      <button class="layout-btn" data-layout="hsplit" onclick="setLayout('hsplit')"><svg width="14" height="12" viewBox="0 0 14 12"><rect x="1" y="1" width="5" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="8" y="1" width="5" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></button>
-      <button class="layout-btn" data-layout="vsplit" onclick="setLayout('vsplit')"><svg width="14" height="12" viewBox="0 0 14 12"><rect x="1" y="1" width="12" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="1" y="7" width="12" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></button>
-      <button class="layout-btn" data-layout="triple" onclick="setLayout('triple')"><svg width="14" height="12" viewBox="0 0 14 12"><rect x="0.5" y="1" width="3.5" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="5.25" y="1" width="3.5" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="10" y="1" width="3.5" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/></svg></button>
-      <button class="layout-btn" data-layout="quad" onclick="setLayout('quad')"><svg width="14" height="12" viewBox="0 0 14 12"><rect x="1" y="1" width="5" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="8" y="1" width="5" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="1" y="7" width="5" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="8" y="7" width="5" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></button>
+
+    <div class="tab-strip" id="tab-strip"></div>
+
+    <!-- Right Toolbar -->
+    <div class="toolbar-right">
+      <div class="view-toggle">
+        <button class="view-btn active" data-view="terminal" onclick="setViewMode('terminal')">Terminal</button>
+        <button class="view-btn" data-view="messenger" onclick="setViewMode('messenger')">Messenger</button>
+      </div>
+      <div class="toolbar-sep"></div>
+      <div class="layout-btns" id="layout-btns">
+        <button class="layout-btn active" data-layout="single" onclick="setLayout('single')" title="Single pane">
+          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="1" width="12" height="12" rx="1.5"/></svg>
+        </button>
+        <button class="layout-btn" data-layout="hsplit" onclick="setLayout('hsplit')" title="Horizontal split">
+          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="1" width="12" height="12" rx="1.5"/><line x1="7" y1="1" x2="7" y2="13"/></svg>
+        </button>
+        <button class="layout-btn" data-layout="vsplit" onclick="setLayout('vsplit')" title="Vertical split">
+          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="1" width="12" height="12" rx="1.5"/><line x1="1" y1="7" x2="13" y2="7"/></svg>
+        </button>
+        <button class="layout-btn" data-layout="triple" onclick="setLayout('triple')" title="Triple pane">
+          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="1" width="12" height="12" rx="1.5"/><line x1="7" y1="1" x2="7" y2="13"/><line x1="7" y1="7" x2="13" y2="7"/></svg>
+        </button>
+        <button class="layout-btn" data-layout="quad" onclick="setLayout('quad')" title="Quad pane">
+          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="1" width="12" height="12" rx="1.5"/><line x1="7" y1="1" x2="7" y2="13"/><line x1="1" y1="7" x2="13" y2="7"/></svg>
+        </button>
+      </div>
+      <div class="toolbar-sep"></div>
       <span id="screenshot-wrap">
-        <button class="layout-btn" onclick="toggleScreenshotMenu(event)" title="Screenshot"><svg width="14" height="12" viewBox="0 0 14 12"><rect x="1" y="2" width="12" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="7" cy="7" r="2.5" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="4" y="1" width="3" height="2" rx="0.5" fill="currentColor"/></svg></button>
+        <button class="tool-btn" onclick="toggleScreenshotMenu(event)" title="Screenshot">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+        </button>
         <div id="screenshot-dropdown">
           <button onclick="doScreenshot('snip')">Snip Region</button>
           <button onclick="doScreenshot('window')">Window</button>
           <button onclick="doScreenshot('screen')">Screen</button>
         </div>
       </span>
-      <button id="fullscreen-btn" onclick="toggleFullscreen()" title="Fullscreen">&#x26F6;</button>
+      <button class="tool-btn" id="fullscreen-btn" onclick="toggleFullscreen()" title="Fullscreen">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+      </button>
     </div>
   </div>
-  <div id="pane-area" class="layout-single"></div>
+  <div class="pane-area layout-single" id="pane-area"></div>
 </div>
 
 <!-- Mobile Chat View (iOS/iPad) -->

@@ -280,7 +280,7 @@ function showPicker() {
   if (clock) clock.style.opacity = currentPage === 0 ? '1' : '0';
   // Only hide terminal view if no tabs are open
   if (Object.keys(sessions).length === 0) {
-    document.getElementById('terminal-view').style.display = 'none';
+    document.getElementById('terminal-view').classList.remove('active');
   }
   loadProjects();
 }
@@ -423,7 +423,7 @@ function openSession(name, isShell, continueFlag, resumeId) {
 
   // Show terminal view, hide picker
   hidePicker();
-  document.getElementById('terminal-view').style.display = 'flex';
+  document.getElementById('terminal-view').classList.add('active');
 
   // Create container
   const container = document.createElement('div');
@@ -474,9 +474,9 @@ function openSession(name, isShell, continueFlag, resumeId) {
       brightMagenta: '#ff00ff',
       brightCyan: '#00ffff',
       brightWhite: '#ffffff',
-      scrollbarSliderBackground: 'rgba(0,204,51,0.4)',
-      scrollbarSliderHoverBackground: 'rgba(0,255,65,0.55)',
-      scrollbarSliderActiveBackground: 'rgba(0,255,65,0.7)',
+      scrollbarSliderBackground: 'rgba(56,189,248,0.15)',
+      scrollbarSliderHoverBackground: 'rgba(56,189,248,0.25)',
+      scrollbarSliderActiveBackground: 'rgba(56,189,248,0.35)',
     },
   });
   const fitAddon = new FitAddon.FitAddon();
@@ -696,25 +696,28 @@ function closeSession(id) {
 function renderTabs() {
   const strip = document.getElementById('tab-strip');
   strip.innerHTML = '';
-  const muteIcon = '<svg viewBox="0 0 24 24"><polygon points="11,5 6,9 2,9 2,15 6,15 11,19"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>';
-  const speakerIcon = '<svg viewBox="0 0 24 24"><polygon points="11,5 6,9 2,9 2,15 6,15 11,19"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>';
+  const muteIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>';
+  const speakerIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>';
+  const closeIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
   for (const [id, s] of Object.entries(sessions)) {
+    const tabColor = s.isShell ? '#38bdf8' : getProjectColor(s.name);
     const tab = document.createElement('div');
-    tab.className = 'tab' + (id === activeSessionId ? ' active' : '');
+    tab.className = 'tab-item' + (id === activeSessionId ? ' active' : '') + (s.speaking ? ' speaking' : '');
     tab.innerHTML =
-      '<span class="tab-mute' + (s.muted ? ' muted' : '') + '" onclick="event.stopPropagation(); toggleMute(\'' + id + '\')">' + (s.muted ? muteIcon : speakerIcon) + '</span>' +
+      '<div class="tab-color" style="background:' + tabColor + '"></div>' +
+      (s.isShell ? '<span class="tab-sh-badge">SH</span>' : '') +
       '<span class="tab-name">' + s.name + '</span>' +
-      (s.isShell ? '<span class="tab-shell">SHELL</span>' : '') +
-      '<span class="tab-close" onclick="event.stopPropagation(); closeSession(\'' + id + '\')">&times;</span>';
+      '<button class="tab-mute' + (s.muted ? ' muted' : '') + (s.speaking ? ' speaking' : '') + '" onclick="event.stopPropagation(); toggleMute(\'' + id + '\')">' + (s.muted ? muteIcon : speakerIcon) + '</button>' +
+      '<button class="tab-close" onclick="event.stopPropagation(); closeSession(\'' + id + '\')">' + closeIcon + '</button>';
     tab.onclick = () => switchTab(id);
     if (!s.isShell) {
       tab.oncontextmenu = (e) => { e.preventDefault(); showVoicePicker(id, e); };
     }
     strip.appendChild(tab);
   }
-  const addBtn = document.createElement('div');
-  addBtn.className = 'tab tab-add';
-  addBtn.innerHTML = '+';
+  const addBtn = document.createElement('button');
+  addBtn.className = 'tab-add';
+  addBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
   addBtn.onclick = () => showPicker();
   strip.appendChild(addBtn);
 }
@@ -787,6 +790,18 @@ function switchTab(id) {
 }
 
 // ══════════════════════════════════════════
+//  View mode toggle (Terminal / Messenger)
+// ══════════════════════════════════════════
+let viewMode = 'terminal';
+function setViewMode(mode) {
+  viewMode = mode;
+  document.querySelectorAll('.view-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.view === mode);
+  });
+  // TODO: Wire up messenger pane switching in PAGE 3
+}
+
+// ══════════════════════════════════════════
 //  Pane layouts
 // ══════════════════════════════════════════
 function setLayout(newLayout) {
@@ -816,7 +831,7 @@ function setLayout(newLayout) {
 
 function renderPanes() {
   const area = document.getElementById('pane-area');
-  area.className = 'layout-' + layout;
+  area.className = 'pane-area layout-' + layout;
   area.innerHTML = '';
 
   const paneCount = { single: 1, hsplit: 2, vsplit: 2, triple: 3, quad: 4 }[layout] || 1;
@@ -1152,7 +1167,7 @@ document.addEventListener('drop', (e) => {
 (function init() {
   if (isMobile) {
     document.body.classList.add('mobile');
-    document.getElementById('terminal-view').style.display = 'none';
+    document.getElementById('terminal-view').classList.remove('active');
     showPicker();
     return;
   }
@@ -1217,7 +1232,7 @@ function goPage(idx) {
 // Keyboard navigation for pages
 document.addEventListener('keydown', function(e) {
   // Don't navigate if terminal view is active or input is focused
-  if (document.getElementById('terminal-view').style.display === 'flex') return;
+  if (document.getElementById('terminal-view').classList.contains('active')) return;
   if (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA') return;
 
   if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); goPage(currentPage + 1); }
@@ -1301,7 +1316,7 @@ let mobilePollTimer = null;
 function mobileInit() {
   if (!isMobile) return;
   // Hide desktop UI, show mobile picker
-  document.getElementById('terminal-view').style.display = 'none';
+  document.getElementById('terminal-view').classList.remove('active');
   // The picker works for mobile too — cards open mobile chat instead
 }
 
