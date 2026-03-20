@@ -12,7 +12,7 @@ const { execSync } = require('child_process');
 const pty = require('node-pty');
 const WebSocket = require('ws');
 const { Terminal: HeadlessTerminal } = require('@xterm/headless');
-const { isAuthenticated, handleAuthRoute } = require('./auth');
+const { isAuthenticated, handleAuthRoute, checkWebSocketAuth } = require('./auth');
 
 // Ignore SIGINT like Python version
 process.on('SIGINT', () => {});
@@ -1041,7 +1041,8 @@ async function requestHandler(req, res) {
     }
 
     // Auth routes are always accessible
-    if (pathname.startsWith('/auth/')) {
+    const authPaths = ['/auth/', '/login', '/approve', '/do-approve', '/check', '/register'];
+    if (authPaths.some(p => pathname === p || pathname.startsWith(p + '/') || pathname.startsWith(p + '?'))) {
         const handled = await handleAuthRoute(req, res, pathname);
         if (handled) return;
     }
@@ -1049,7 +1050,7 @@ async function requestHandler(req, res) {
     // Everything else requires authentication
     if (!isAuthenticated(req)) {
         if (req.method === 'GET' && !pathname.startsWith('/api/')) {
-            res.writeHead(302, { Location: '/auth/login' });
+            res.writeHead(302, { Location: '/login' });
             res.end();
         } else {
             res.writeHead(401, { 'Content-Type': 'application/json' });
@@ -1127,7 +1128,7 @@ function main() {
         const url = new URL(req.url, 'https://localhost');
         if (url.pathname === '/ws') {
             // Auth check for WebSocket upgrade
-            if (!isAuthenticated(req)) {
+            if (!checkWebSocketAuth(req)) {
                 socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
                 socket.destroy();
                 return;
