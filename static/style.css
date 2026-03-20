@@ -547,6 +547,7 @@ body::after {
   background:rgba(10,10,15,0.5);
   backdrop-filter:blur(12px);
   flex-shrink:0;
+  position:relative; z-index:10;
 }
 .btn-back {
   width:40px; height:40px; border:none;
@@ -563,6 +564,8 @@ body::after {
   display:flex; align-items:stretch; flex:1;
   overflow-x:auto; overflow-y:hidden;
   scrollbar-width:none;
+  min-width:0;
+  cursor:default;
 }
 .tab-strip::-webkit-scrollbar { display:none; }
 .tab-item {
@@ -665,9 +668,11 @@ body::after {
   background:none; color:var(--text3);
   cursor:pointer; display:flex; align-items:center;
   justify-content:center; transition:all 0.15s;
+  padding:0; position:relative; z-index:2;
 }
 .tool-btn:hover { border-color:var(--accent-border); color:var(--text2); }
-.tool-btn svg { width:14px; height:14px; }
+.tool-btn svg { width:14px; height:14px; pointer-events:none; }
+#screenshot-wrap { position:relative; display:flex; align-items:center; }
 
 #voice-picker {
   position: fixed; z-index: 1000; background: var(--bg-deep); border: 1px solid var(--glass-border);
@@ -705,7 +710,7 @@ body::after {
 .pane-area.layout-quad > .pane-row > .pane { flex:1; min-width:0; }
 .pane {
   flex:1; display:flex; flex-direction:column;
-  background:rgba(10,10,15,0.85);
+  background:rgba(10,10,15,0.5);
   border:1px solid transparent;
   border-radius:0;
   min-width:0; min-height:0;

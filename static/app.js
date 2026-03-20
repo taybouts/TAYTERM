@@ -427,7 +427,7 @@ function openSession(name, isShell, continueFlag, resumeId) {
 
   // Create container
   const container = document.createElement('div');
-  container.style.cssText = 'width:100%;height:100%;display:none;position:relative;';
+  container.style.cssText = 'flex:1;display:none;position:relative;min-width:0;min-height:0;';
 
   // Loading overlay with running pixel Claude logo
   const loader = document.createElement('div');
@@ -456,7 +456,7 @@ function openSession(name, isShell, continueFlag, resumeId) {
     drawBoldTextInBrightColors: true,
     overviewRuler: { width: 10 },
     theme: {
-      background: '#0a0a0f',
+      background: 'rgba(10,10,15,0.5)',
       foreground: '#ececec',
       black: '#000000',
       red: '#ff0000',
@@ -846,9 +846,9 @@ function createPane(i, isMultiPane) {
       }
       pane.appendChild(label);
     }
-    s.container.style.display = 'block';
-    s.container.style.width = '100%';
-    s.container.style.height = '100%';
+    s.container.style.display = 'flex';
+    s.container.style.flex = '1';
+    s.container.style.minHeight = '0';
     pane.appendChild(s.container);
     const paneIdx = i;
     pane.onclick = () => {
