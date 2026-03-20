@@ -427,7 +427,7 @@ function openSession(name, isShell, continueFlag, resumeId) {
 
   // Create container
   const container = document.createElement('div');
-  container.style.cssText = 'flex:1;display:none;position:relative;min-width:0;min-height:0;';
+  container.style.cssText = 'flex:1;display:none;position:relative;min-width:0;min-height:0;margin:4px;';
 
   // Loading overlay with running pixel Claude logo
   const loader = document.createElement('div');

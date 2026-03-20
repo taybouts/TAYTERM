@@ -716,8 +716,11 @@ body::after {
   border-radius:0;
   min-width:0; min-height:0;
   position:relative;
+  overflow:hidden;
   padding:4px;
 }
+.pane .xterm { margin:0; }
+.pane .xterm-viewport { margin:0; }
 .pane.focused { border-color:rgba(56,189,248,0.15); }
 .pane.selected { border-color:var(--accent-border); border-style:dashed; }
 .pane-label {
