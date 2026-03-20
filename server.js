@@ -337,7 +337,8 @@ function startReader(sessionKey) {
             if (!text) return;
 
             // Skip noise lines — don't change state, don't log
-            if (/^[─━═\-]{3,}/.test(text)) return;
+            if (/[─━═]{2,}/.test(text)) return;
+            if (/^[─━═\-\*✶]{1,3}\s/.test(text)) return;
             if (/^(Opus|Sonnet|Haiku|Claude)\s+\d|bypass permissions|^\d+\/\d+k|^⏵/.test(text)) return;
             if (/^[✢✻✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏·]|Clauding|Thinking|Crunched|Cogitated|Brewed|Spelunking|Worked for|Noodling|Fiddle/.test(text)) return;
             if (/^\d+ files? |ctrl\+o to expand|Interrupted|Searched for|alt\+v to paste|Press up to edit/.test(text)) return;
@@ -354,7 +355,8 @@ function startReader(sessionKey) {
             } else if (/^[⎿╰╭▎│]/.test(text)) {
                 outputState = 'TOOL';
             } else if (/^❯/.test(text)) {
-                outputState = 'IDLE';
+                const userInput = text.replace(/^❯\s*/, '').trim();
+                if (userInput.length > 0) outputState = 'IDLE';
             } else if (outputState === 'SPEAKING') {
                 if (text.length > 5) emitCleanText(text);
             }

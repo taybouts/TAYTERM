@@ -421,19 +421,29 @@ def main():
 
     threading.Thread(target=open_when_ready, daemon=True).start()
 
-    # Create log window
+    # Create log window — hidden=True so closing hides instead of quits
     win_title = "TAYTERM Node Log"
     log_window = webview.create_window(
         win_title, html=LOG_HTML,
         width=640, height=400,
         js_api=LogApi(),
         background_color='#000000',
+        hidden=False,
+        on_top=False,
     )
 
     # Set icon after window is shown
     def on_shown():
         time.sleep(0.3)
         set_window_icon(win_title)
+
+    def on_closing():
+        # Hide instead of close — keep server running
+        if log_window:
+            log_window.hide()
+        return False  # Prevent actual close
+
+    log_window.events.closing += on_closing
 
     webview.start(on_shown, gui='edgechromium', debug=False)
 
