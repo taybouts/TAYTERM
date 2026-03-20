@@ -1,34 +1,113 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <title>TAYTERM</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.min.css">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@300;400;500&display=swap" rel="stylesheet">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="manifest" href="/static/manifest.json">
-<meta name="theme-color" content="#000000">
+<meta name="theme-color" content="#0a0a0f">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 
-<canvas id="matrix-bg"></canvas>
+<!-- HUD corners -->
+<div class="hud hud-tl"></div>
+<div class="hud hud-tr"></div>
+<div class="hud hud-bl"></div>
+<div class="hud hud-br"></div>
+
+<!-- Clock -->
+<div class="clock-wrap" id="clock-wrap">
+  <div class="clock-time" id="clockTime">--:--</div>
+  <div class="clock-date" id="clockDate">---</div>
+</div>
 
 <!-- Project Picker -->
-<div id="picker">
-  <div id="picker-header"><h1>> TAYTERM_</h1><div id="picker-right"><button id="new-project-btn" onclick="newProject()">+ New</button><button id="gear-btn" title="Settings">&#9881;</button></div></div>
-  <div id="project-grid"></div>
+<div id="picker" class="picker-view">
+
+<!-- Pages container -->
+<div class="pages" id="pages">
+
+  <!-- PAGE 1: HERO -->
+  <div class="page" id="page0">
+    <section class="hero" id="hero">
+      <div class="hero-title">TayTerm</div>
+      <div class="hero-sub">Terminal</div>
+      <div class="fav-hero" id="favHero">
+        <div class="fav-hero-empty">Right-click any project below to add favorites</div>
+      </div>
+      <div class="hero-status" id="heroStatus"></div>
+      <button class="all-projects-btn" id="allProjectsBtn" onclick="goPage(1)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+        All Projects
+      </button>
+    </section>
+  </div>
+
+  <!-- PAGE 2: DASHBOARD -->
+  <div class="page" id="page1">
+    <div class="dashboard" id="dashboard">
+      <div class="dash-section">
+        <div class="dash-label">Search</div>
+        <div class="search-bar">
+          <div class="search-box">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input class="search-input" id="searchInput" placeholder="Search projects..." spellcheck="false" autocomplete="off">
+          </div>
+          <div class="filters" id="filters">
+            <button class="filter-pill active" data-filter="All" onclick="setFilter('All')">All</button>
+            <button class="filter-pill" data-filter="Active" onclick="setFilter('Active')">Active</button>
+            <button class="filter-pill" data-filter="Development" onclick="setFilter('Development')">Development</button>
+            <button class="filter-pill" data-filter="Other" onclick="setFilter('Other')">Other</button>
+          </div>
+          <div class="theme-swatches" style="margin-left:auto">
+            <div class="theme-dot active" data-theme="" style="background:linear-gradient(135deg,#0a0a0f,#0d1117)" title="Midnight"></div>
+            <div class="theme-dot" data-theme="slate" style="background:linear-gradient(135deg,#1e1e2e,#252536)" title="Slate"></div>
+            <div class="theme-dot" data-theme="ivory" style="background:linear-gradient(135deg,#d8d5cf,#cec9c2)" title="Ivory"></div>
+            <div class="theme-dot" data-theme="warm" style="background:linear-gradient(135deg,#181210,#1f1915)" title="Warm"></div>
+            <div class="theme-dot" data-theme="ocean" style="background:linear-gradient(135deg,#0a1628,#0f1d32)" title="Ocean"></div>
+          </div>
+        </div>
+      </div>
+      <div class="dash-section">
+        <div class="dash-label">Projects</div>
+        <div id="project-grid"></div>
+      </div>
+    </div>
+  </div>
+
+</div><!-- end pages -->
+
+<!-- Page Navigation -->
+<div class="page-nav" id="pageNav">
+  <button class="page-nav-arrow" id="navPrev" onclick="goPage(currentPage-1)" disabled>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+  </button>
+  <div class="page-dots">
+    <button class="page-dot active" data-page="0" onclick="goPage(0)"></button>
+    <div class="page-dot-label" id="pageLabel">Home</div>
+    <button class="page-dot" data-page="1" onclick="goPage(1)"></button>
+  </div>
+  <button class="page-nav-arrow" id="navNext" onclick="goPage(currentPage+1)">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+  </button>
 </div>
+
+</div><!-- end picker -->
 
 <!-- Terminal View -->
 <div id="terminal-view">
   <div id="top-bar">
-    <button id="back-btn" onclick="showPicker()">&#9664;</button>
+    <button id="back-btn" onclick="showPicker()">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+    </button>
     <div id="tab-strip"></div>
     <div id="layout-btns">
       <button class="layout-btn active" data-layout="single" onclick="setLayout('single')"><svg width="14" height="12" viewBox="0 0 14 12"><rect x="1" y="1" width="12" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></button>
@@ -91,56 +170,6 @@
     <div class="resume-list" id="resume-list"></div>
   </div>
 </div>
-
-<!-- Settings Panel -->
-<div id="settings-panel">
-  <button id="settings-close" onclick="toggleSettings()">&times;</button>
-  <h2>Settings</h2>
-
-  <div class="setting-toggle" onclick="toggleScanlines()">
-    <span>Scanlines</span>
-    <div class="toggle-switch" id="toggle-scanlines"></div>
-  </div>
-
-  <div class="setting-toggle" onclick="toggleRain()">
-    <span>Matrix Rain</span>
-    <div class="toggle-switch on" id="toggle-rain"></div>
-  </div>
-
-  <div class="setting-group">
-    <label>Opacity <span id="val-opacity">0.12</span></label>
-    <input type="range" id="sl-opacity" min="0" max="30" value="12" oninput="updateSetting('opacity', this.value/100)">
-  </div>
-
-  <div class="setting-group">
-    <label>Speed <span id="val-speed">50ms</span></label>
-    <input type="range" id="sl-speed" min="20" max="150" value="50" oninput="updateSetting('speed', +this.value)">
-  </div>
-
-  <div class="setting-group">
-    <label>Fade <span id="val-fade">0.05</span></label>
-    <input type="range" id="sl-fade" min="1" max="25" value="5" oninput="updateSetting('fade', this.value/100)">
-  </div>
-
-  <div class="setting-group">
-    <label>Font Size <span id="val-fontSize">14px</span></label>
-    <input type="range" id="sl-fontSize" min="8" max="28" value="14" oninput="updateSetting('fontSize', +this.value)">
-  </div>
-
-  <div class="setting-group">
-    <label>Color</label>
-    <div class="color-presets">
-      <div class="color-preset active" style="background:#00ff41" onclick="updateSetting('color','#00ff41')" title="Green"></div>
-      <div class="color-preset" style="background:#00ccff" onclick="updateSetting('color','#00ccff')" title="Cyan"></div>
-      <div class="color-preset" style="background:#ff0040" onclick="updateSetting('color','#ff0040')" title="Red"></div>
-      <div class="color-preset" style="background:#ffaa00" onclick="updateSetting('color','#ffaa00')" title="Amber"></div>
-      <div class="color-preset" style="background:#cc44ff" onclick="updateSetting('color','#cc44ff')" title="Purple"></div>
-      <div class="color-preset" style="background:#ffffff" onclick="updateSetting('color','#ffffff')" title="White"></div>
-    </div>
-  </div>
-</div>
-
-<div class="scanlines" id="scanlines-overlay" style="display:none"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/lib/addon-fit.min.js"></script>

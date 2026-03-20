@@ -16,6 +16,7 @@ const KOKORO_VOICES = [
 let layout = 'single';
 let paneSlots = [];  // session IDs assigned to panes
 let selectedPane = 0;  // which pane is selected for tab assignment
+let currentPage = 0;
 
 // ══════════════════════════════════════════
 //  Session persistence (localStorage)
@@ -62,98 +63,221 @@ function movePinned(name, dir) {
   loadProjects();
 }
 
-function buildCard(p, isPinned, pinIdx, pinCount) {
-  const card = document.createElement('div');
-  card.className = 'project-card' + (p.live ? ' live' : '');
-  let badges = '';
-  if (p.live) badges += '<span class="badge badge-live">LIVE</span>';
-  if (p.subscribers > 0) badges += '<span class="badge badge-subs">' + p.subscribers + '</span>';
-  if (p.claude) badges += '<span class="badge badge-claude">CLAUDE</span>';
-  if (p.git) badges += '<span class="badge badge-git">GIT</span>';
+const terminalIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>';
 
-  // Pin controls in project-name row
-  let pinHtml = '';
-  if (isPinned) {
-    const leftDisabled = pinIdx === 0 ? ' style="opacity:0.2;pointer-events:none"' : '';
-    const rightDisabled = pinIdx === pinCount - 1 ? ' style="opacity:0.2;pointer-events:none"' : '';
-    pinHtml =
-      '<span class="pin-controls">' +
-        '<span class="pin-arrow"' + leftDisabled + ' onclick="event.stopPropagation(); movePinned(\'' + p.name + '\', -1)">&lsaquo;</span>' +
-        '<span class="pin-icon pinned" onclick="event.stopPropagation(); unpinProject(\'' + p.name + '\')" title="Unpin">&#9733;</span>' +
-        '<span class="pin-arrow"' + rightDisabled + ' onclick="event.stopPropagation(); movePinned(\'' + p.name + '\', 1)">&rsaquo;</span>' +
-      '</span>';
-  } else {
-    pinHtml = '<span class="pin-icon" onclick="event.stopPropagation(); pinProject(\'' + p.name + '\')" title="Pin">&#9734;</span>';
+// App color map for project icons
+const projectColors = {};
+const defaultColors = ['#0284c7','#d4a847','#f43f5e','#818cf8','#14b8a6','#a78bfa','#f97316','#22c55e'];
+function getProjectColor(name) {
+  if (!projectColors[name]) {
+    let hash = 0;
+    for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
+    projectColors[name] = defaultColors[Math.abs(hash) % defaultColors.length];
   }
-
-  let actionsHtml = '';
-  if (p.claude_live) {
-    actionsHtml =
-      '<button class="btn-primary" onclick="event.stopPropagation(); openSession(\'' + p.name + '\', false)">Claude</button>' +
-      '<div class="actions-row">' +
-        '<button class="btn-shell" onclick="event.stopPropagation(); openSession(\'' + p.name + '\', true)">Shell</button>' +
-        '<button class="btn-kill" onclick="event.stopPropagation(); killProject(\'' + p.name + '\')">Kill</button>' +
-      '</div>';
-  } else if (p.can_continue) {
-    actionsHtml =
-      '<button class="btn-primary" onclick="event.stopPropagation(); continueSession(\'' + p.name + '\')">Continue</button>' +
-      '<div class="actions-row">' +
-        '<button class="btn-dim" onclick="event.stopPropagation(); confirmNewSession(\'' + p.name + '\')">New</button>' +
-        '<button class="btn-dim" onclick="event.stopPropagation(); resumeSession(\'' + p.name + '\')">Resume (' + p.conv_count + ')</button>' +
-        '<button class="btn-shell" onclick="event.stopPropagation(); openSession(\'' + p.name + '\', true)">Shell</button>' +
-      '</div>';
-  } else {
-    actionsHtml =
-      '<button class="btn-primary" onclick="event.stopPropagation(); openSession(\'' + p.name + '\', false)">Claude</button>' +
-      '<div class="actions-row">' +
-        '<button class="btn-shell" onclick="event.stopPropagation(); openSession(\'' + p.name + '\', true)">Shell</button>' +
-      '</div>';
-  }
-  card.innerHTML =
-    '<div class="project-name-row">' +
-      '<div class="project-name">' + p.name + '</div>' +
-      pinHtml +
-    '</div>' +
-    '<div class="project-badges">' + badges + '</div>' +
-    '<div class="project-actions">' + actionsHtml + '</div>' +
-    (p.desc ? '<div class="project-desc">' + p.desc + '</div>' : '<div class="project-desc">&nbsp;</div>');
-  if (isMobile) {
-    card.onclick = () => mobileOpenSession(p.name, p.can_continue);
-  } else {
-    card.onclick = () => p.can_continue ? continueSession(p.name) : openSession(p.name, false);
-  }
-  return card;
+  return projectColors[name];
 }
+function adjustColor(hex, amount) {
+  let r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
+  r = Math.min(255, r + amount); g = Math.min(255, g + amount); b = Math.min(255, b + amount);
+  return '#' + [r,g,b].map(c => c.toString(16).padStart(2,'0')).join('');
+}
+
+function renderFavorites(projects, pinned) {
+  const favHero = document.getElementById('favHero');
+  if (!favHero) return;
+  const favProjects = pinned.map(name => projects.find(p => p.name === name)).filter(Boolean);
+  if (!favProjects.length) {
+    favHero.innerHTML = '<div class="fav-hero-empty">Right-click any project below to add favorites</div>';
+    return;
+  }
+  favHero.innerHTML = favProjects.map(p => {
+    const color = getProjectColor(p.name);
+    const statusClass = p.live ? 'online' : 'offline';
+    const esc = p.name.replace(/'/g, "\\'");
+    return '<div class="fav-item" style="--glow:' + color + '30" onclick="favClick(\'' + esc + '\')" oncontextmenu="event.preventDefault();unpinProject(\'' + esc + '\')">' +
+      '<div class="fav-icon" style="background:linear-gradient(135deg, ' + color + ', ' + adjustColor(color, 40) + ')">' +
+        terminalIcon +
+        '<div class="fav-status ' + statusClass + '"></div>' +
+      '</div>' +
+      '<div class="fav-label">' + p.name + '</div>' +
+      '<div class="fav-actions">' +
+        '<button class="fav-act" onclick="event.stopPropagation(); confirmNewSession(\'' + esc + '\')">New</button>' +
+        '<button class="fav-act shell" onclick="event.stopPropagation(); openSession(\'' + esc + '\', true)">Shell</button>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function favClick(name) {
+  const p = allProjects.find(pr => pr.name === name);
+  if (!p) return;
+  if (isMobile) { mobileOpenSession(name, p.can_continue); return; }
+  p.can_continue ? continueSession(name) : openSession(name, false);
+}
+
+function renderHeroStatus(projects, pinned) {
+  const el = document.getElementById('heroStatus');
+  if (!el) return;
+  const live = projects.filter(p => p.live).length;
+  const total = projects.length;
+  const favCount = pinned.length;
+  el.innerHTML =
+    '<div class="hs-item"><span class="hs-dot g"></span>' + live + ' Live</div>' +
+    '<div class="hs-item"><span class="hs-dot b"></span>' + total + ' Projects</div>' +
+    '<div class="hs-item"><span class="hs-dot a"></span>' + favCount + ' Favorites</div>';
+}
+
+let activeFilter = 'All';
+let searchQuery = '';
+
+function setFilter(f) {
+  activeFilter = f;
+  document.querySelectorAll('.filter-pill').forEach(p => p.classList.toggle('active', p.dataset.filter === f));
+  renderDashboard(allProjects, getPinnedProjects());
+}
+
+function getCategory(p) {
+  if (p.live) return 'Active';
+  if (p.git) return 'Development';
+  return 'Other';
+}
+
+function renderDashboard(projects, pinned) {
+  const grid = document.getElementById('project-grid');
+  if (!grid) return;
+  const pinnedSet = new Set(pinned);
+
+  let filtered = projects.map((p, i) => ({...p, _idx: i}));
+
+  // Search filter
+  if (searchQuery) {
+    const q = searchQuery.toLowerCase();
+    filtered = filtered.filter(p => p.name.toLowerCase().includes(q) || (p.desc || '').toLowerCase().includes(q));
+  }
+
+  // Category filter
+  if (activeFilter !== 'All') {
+    filtered = filtered.filter(p => getCategory(p) === activeFilter);
+  }
+
+  if (!filtered.length) {
+    grid.innerHTML = '<div style="text-align:center;padding:60px 20px;font-family:var(--font-mono);font-size:13px;color:var(--text2);letter-spacing:2px;">No projects found</div>';
+    return;
+  }
+
+  // Group by category
+  const groups = {};
+  const catOrder = ['Active', 'Development', 'Other'];
+  filtered.forEach(p => {
+    const cat = getCategory(p);
+    if (!groups[cat]) groups[cat] = [];
+    groups[cat].push(p);
+  });
+
+  let html = '';
+  let cardIdx = 0;
+  catOrder.forEach(cat => {
+    if (!groups[cat]) return;
+    html += '<div class="cat-label">' + cat + '</div>';
+    html += '<div class="project-grid">';
+    groups[cat].forEach(p => {
+      const color = getProjectColor(p.name);
+      const esc = p.name.replace(/'/g, "\\'");
+      const isFav = pinnedSet.has(p.name);
+      let badges = '';
+      if (p.live) badges += '<span class="badge-live"><span class="badge-live-dot"></span>LIVE</span>';
+      if (p.git) badges += '<span class="badge-pill">GIT</span>';
+      if (p.claude) badges += '<span class="badge-pill">CLAUDE</span>';
+      if (p.subscribers > 0) badges += '<span class="badge-subs">' + p.subscribers + ' connected</span>';
+      const convDot = p.can_continue ? '<div class="conv-dot" title="Has conversation"></div>' : '';
+
+      let actionsHtml = '';
+      if (p.claude_live) {
+        actionsHtml =
+          '<button class="act-btn primary" onclick="event.stopPropagation(); openSession(\'' + esc + '\', false)">Claude</button>' +
+          '<button class="act-btn shell" onclick="event.stopPropagation(); openSession(\'' + esc + '\', true)">Shell</button>' +
+          '<button class="act-btn kill" onclick="event.stopPropagation(); killProject(\'' + esc + '\')">Kill</button>';
+      } else if (p.can_continue) {
+        actionsHtml =
+          '<button class="act-btn" onclick="event.stopPropagation(); confirmNewSession(\'' + esc + '\')">New</button>' +
+          '<button class="act-btn shell" onclick="event.stopPropagation(); openSession(\'' + esc + '\', true)">Shell</button>';
+      } else {
+        actionsHtml =
+          '<button class="act-btn" onclick="event.stopPropagation(); confirmNewSession(\'' + esc + '\')">New</button>' +
+          '<button class="act-btn shell" onclick="event.stopPropagation(); openSession(\'' + esc + '\', true)">Shell</button>';
+      }
+
+      html += '<div class="project-card ' + (p.live ? 'live' : '') + '" style="animation-delay:' + (cardIdx * 0.05) + 's"' +
+        ' onclick="cardClick(\'' + esc + '\')"' +
+        ' oncontextmenu="event.preventDefault();toggleFav(\'' + esc + '\')">' +
+        (isFav ? '<div class="card-star">\u2605</div>' : '') +
+        '<div class="project-card-header">' +
+          '<div class="project-icon" style="background:linear-gradient(135deg, ' + color + ', ' + adjustColor(color, 40) + ')">' +
+            terminalIcon + convDot +
+          '</div>' +
+          '<div>' +
+            '<div class="project-name">' + p.name + '</div>' +
+            '<div class="project-badges">' + badges + '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="project-desc">' + (p.desc || '&nbsp;') + '</div>' +
+        '<div class="project-actions">' + actionsHtml + '</div>' +
+      '</div>';
+      cardIdx++;
+    });
+    html += '</div>';
+  });
+
+  grid.innerHTML = html;
+}
+
+function cardClick(name) {
+  const p = allProjects.find(pr => pr.name === name);
+  if (!p) return;
+  if (isMobile) { mobileOpenSession(name, p.can_continue); return; }
+  p.can_continue ? continueSession(name) : openSession(name, false);
+}
+
+function toggleFav(name) {
+  const pinned = getPinnedProjects();
+  if (pinned.includes(name)) {
+    unpinProject(name);
+  } else {
+    pinProject(name);
+  }
+}
+
+let allProjects = [];
 
 async function loadProjects() {
   const resp = await fetch('/api/projects');
-  const projects = await resp.json();
-  const grid = document.getElementById('project-grid');
-  grid.innerHTML = '';
+  allProjects = await resp.json();
   const pinned = getPinnedProjects();
-  const pinnedSet = new Set(pinned);
 
-  // Pinned projects first, in saved order
-  for (let i = 0; i < pinned.length; i++) {
-    const p = projects.find(pr => pr.name === pinned[i]);
-    if (p) grid.appendChild(buildCard(p, true, i, pinned.length));
-  }
+  // Render hero favorites
+  renderFavorites(allProjects, pinned);
 
-  // Unpinned projects, sorted
-  const unpinned = projects.filter(p => !pinnedSet.has(p.name));
-  unpinned.sort((a, b) => {
-    if (a.live !== b.live) return a.live ? -1 : 1;
-    if (a.git !== b.git) return a.git ? -1 : 1;
-    if (a.can_continue !== b.can_continue) return a.can_continue ? -1 : 1;
-    return a.name.localeCompare(b.name);
-  });
-  for (const p of unpinned) {
-    grid.appendChild(buildCard(p, false, -1, 0));
-  }
+  // Render hero status line
+  renderHeroStatus(allProjects, pinned);
+
+  // Render dashboard grid
+  renderDashboard(allProjects, pinned);
+}
+
+function hidePicker() {
+  document.getElementById('picker').style.display = 'none';
+  var nav = document.getElementById('pageNav');
+  if (nav) nav.style.display = 'none';
+  var clock = document.querySelector('.clock-wrap');
+  if (clock) clock.style.opacity = '0';
 }
 
 function showPicker() {
-  document.getElementById('picker').style.display = 'flex';
+  document.getElementById('picker').style.display = '';
+  var nav = document.getElementById('pageNav');
+  if (nav) nav.style.display = '';
+  var clock = document.querySelector('.clock-wrap');
+  if (clock) clock.style.opacity = currentPage === 0 ? '1' : '0';
   // Only hide terminal view if no tabs are open
   if (Object.keys(sessions).length === 0) {
     document.getElementById('terminal-view').style.display = 'none';
@@ -266,7 +390,7 @@ function drawMiniClaude(el) {
     const imgData = tctx.getImageData(0, 0, tmp.width, tmp.height);
     const d = imgData.data;
 
-    ctx.fillStyle = '#00ff41';
+    ctx.fillStyle = '#38bdf8';
     for (let y = 0; y < img.height; y++) {
       for (let x = 0; x < img.width; x++) {
         const i = (y * img.width + x) * 4;
@@ -293,12 +417,12 @@ function openSession(name, isShell, continueFlag, resumeId) {
   // If already open, just switch to it
   if (sessions[id]) {
     switchTab(id);
-    document.getElementById('picker').style.display = 'none';
+    hidePicker();
     return;
   }
 
   // Show terminal view, hide picker
-  document.getElementById('picker').style.display = 'none';
+  hidePicker();
   document.getElementById('terminal-view').style.display = 'flex';
 
   // Create container
@@ -1064,124 +1188,100 @@ document.addEventListener('drop', (e) => {
 // ══════════════════════════════════════════
 
 // ══════════════════════════════════════════
-//  Settings & Matrix Rain
+//  Page Navigation
 // ══════════════════════════════════════════
-const matrixState = {
-  chars: 'アカサタナハマヤラワ0123456789TAYTERM',
-  canvas: document.getElementById('matrix-bg'),
-  interval: null,
-  settings: Object.assign(
-    { opacity: 0.12, speed: 50, fade: 0.05, fontSize: 14, color: '#00ff41', rain: true, scanlines: false },
-    JSON.parse(localStorage.getItem('tayterm_matrix') || '{}')
-  ),
-  drops: [],
-  columns: 0,
-};
+const PAGE_NAMES = ['Home', 'Dashboard'];
 
-function saveMatrixSettings() {
-  localStorage.setItem('tayterm_matrix', JSON.stringify(matrixState.settings));
+function goPage(idx) {
+  idx = Math.max(0, Math.min(1, idx));
+  currentPage = idx;
+  var pagesEl = document.getElementById('pages');
+  if (pagesEl) pagesEl.style.transform = 'translateX(-' + (idx * 100) + 'vw)';
+
+  // Update dots
+  document.querySelectorAll('.page-dot').forEach(function(d) {
+    d.classList.toggle('active', parseInt(d.dataset.page) === idx);
+  });
+  var label = document.getElementById('pageLabel');
+  if (label) label.textContent = PAGE_NAMES[idx];
+  var prev = document.getElementById('navPrev');
+  if (prev) prev.disabled = idx === 0;
+  var next = document.getElementById('navNext');
+  if (next) next.disabled = idx === 1;
+
+  // Show/hide clock on hero page
+  var clock = document.querySelector('.clock-wrap');
+  if (clock) clock.style.opacity = idx === 0 ? '1' : '0';
 }
 
-function initRain() {
-  const { canvas, settings } = matrixState;
-  const ctx = canvas.getContext('2d');
-  canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight;
-  canvas.style.opacity = settings.opacity;
-  matrixState.columns = Math.floor(canvas.width / settings.fontSize);
-  matrixState.drops = Array(matrixState.columns).fill(1);
+// Keyboard navigation for pages
+document.addEventListener('keydown', function(e) {
+  // Don't navigate if terminal view is active or input is focused
+  if (document.getElementById('terminal-view').style.display === 'flex') return;
+  if (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA') return;
 
-  if (matrixState.interval) clearInterval(matrixState.interval);
+  if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); goPage(currentPage + 1); }
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); goPage(currentPage - 1); }
+});
 
-  if (!settings.rain) {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    return;
-  }
+// ══════════════════════════════════════════
+//  Clock
+// ══════════════════════════════════════════
+function updateClock() {
+  var now = new Date();
+  var h = String(now.getHours()).padStart(2, '0');
+  var m = String(now.getMinutes()).padStart(2, '0');
+  var s = String(now.getSeconds()).padStart(2, '0');
+  var timeEl = document.getElementById('clockTime');
+  if (timeEl) timeEl.textContent = h + ':' + m + ':' + s;
 
-  matrixState.interval = setInterval(() => {
-    const s = matrixState.settings;
-    ctx.globalCompositeOperation = 'destination-in';
-    ctx.fillStyle = 'rgba(0,0,0,' + (1 - s.fade) + ')';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.font = s.fontSize + 'px monospace';
-    ctx.fillStyle = s.color;
-    for (let i = 0; i < matrixState.drops.length; i++) {
-      const char = matrixState.chars[Math.floor(Math.random() * matrixState.chars.length)];
-      ctx.fillText(char, i * s.fontSize, matrixState.drops[i] * s.fontSize);
-      if (matrixState.drops[i] * s.fontSize > canvas.height && Math.random() > 0.975) matrixState.drops[i] = 0;
-      matrixState.drops[i]++;
-    }
-  }, settings.speed);
+  var days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  var dateEl = document.getElementById('clockDate');
+  if (dateEl) dateEl.textContent = days[now.getDay()] + ' ' + now.getDate() + ' ' + months[now.getMonth()] + ' ' + now.getFullYear();
 }
+updateClock();
+setInterval(updateClock, 1000);
 
-function toggleSettings() {
-  document.getElementById('settings-panel').classList.toggle('open');
-}
-
-function toggleScanlines() {
-  const s = matrixState.settings;
-  s.scanlines = !s.scanlines;
-  document.getElementById('scanlines-overlay').style.display = s.scanlines ? 'block' : 'none';
-  document.getElementById('toggle-scanlines').classList.toggle('on', s.scanlines);
-  saveMatrixSettings();
-}
-
-function toggleRain() {
-  const s = matrixState.settings;
-  s.rain = !s.rain;
-  document.getElementById('toggle-rain').classList.toggle('on', s.rain);
-  saveMatrixSettings();
-  initRain();
-}
-
-function updateSetting(key, value) {
-  matrixState.settings[key] = value;
-  saveMatrixSettings();
-
-  if (key === 'opacity') {
-    document.getElementById('val-opacity').textContent = value.toFixed(2);
-    matrixState.canvas.style.opacity = value;
-  } else if (key === 'speed') {
-    document.getElementById('val-speed').textContent = value + 'ms';
-    initRain();
-  } else if (key === 'fade') {
-    document.getElementById('val-fade').textContent = value.toFixed(2);
-  } else if (key === 'fontSize') {
-    document.getElementById('val-fontSize').textContent = value + 'px';
-    initRain();
-  } else if (key === 'color') {
-    document.querySelectorAll('.color-preset').forEach(el => {
-      el.classList.toggle('active', el.style.background === value || el.style.backgroundColor === value);
+// ══════════════════════════════════════════
+//  Theme Switching
+// ══════════════════════════════════════════
+(function initThemes() {
+  document.querySelectorAll('.theme-dot').forEach(function(dot) {
+    dot.addEventListener('click', function() {
+      document.querySelectorAll('.theme-dot').forEach(function(d) { d.classList.remove('active'); });
+      dot.classList.add('active');
+      document.body.className = dot.dataset.theme ? 'theme-' + dot.dataset.theme : '';
+      localStorage.setItem('tayterm_theme', dot.dataset.theme || '');
+    });
+  });
+  // Restore saved theme
+  var saved = localStorage.getItem('tayterm_theme');
+  if (saved) {
+    document.body.className = 'theme-' + saved;
+    document.querySelectorAll('.theme-dot').forEach(function(d) {
+      d.classList.toggle('active', (d.dataset.theme || '') === saved);
     });
   }
-}
-
-// Apply saved settings to UI
-(function applySettings() {
-  const s = matrixState.settings;
-  document.getElementById('sl-opacity').value = Math.round(s.opacity * 100);
-  document.getElementById('val-opacity').textContent = s.opacity.toFixed(2);
-  document.getElementById('sl-speed').value = s.speed;
-  document.getElementById('val-speed').textContent = s.speed + 'ms';
-  document.getElementById('sl-fade').value = Math.round(s.fade * 100);
-  document.getElementById('val-fade').textContent = s.fade.toFixed(2);
-  document.getElementById('sl-fontSize').value = s.fontSize;
-  document.getElementById('val-fontSize').textContent = s.fontSize + 'px';
-  document.getElementById('toggle-scanlines').classList.toggle('on', s.scanlines);
-  document.getElementById('toggle-rain').classList.toggle('on', s.rain);
-  document.getElementById('scanlines-overlay').style.display = s.scanlines ? 'block' : 'none';
-  document.querySelectorAll('.color-preset').forEach(el => {
-    el.classList.toggle('active', el.style.background === s.color);
-  });
-  initRain();
 })();
 
+// ══════════════════════════════════════════
+//  Search
+// ══════════════════════════════════════════
+(function initSearch() {
+  var input = document.getElementById('searchInput');
+  if (input) {
+    input.addEventListener('input', function() {
+      searchQuery = this.value;
+      renderDashboard(allProjects, getPinnedProjects());
+    });
+  }
+})();
+
+// ══════════════════════════════════════════
+//  Window resize
+// ══════════════════════════════════════════
 window.addEventListener('resize', () => {
-  matrixState.canvas.width = window.innerWidth;
-  matrixState.canvas.height = window.innerHeight;
-  matrixState.columns = Math.floor(matrixState.canvas.width / matrixState.settings.fontSize);
-  matrixState.drops = Array(matrixState.columns).fill(1);
   for (const s of Object.values(sessions)) {
     if (s.container.style.display !== 'none') s.fitAddon.fit();
   }
@@ -1207,7 +1307,7 @@ function mobileInit() {
 
 function mobileOpenSession(name, continueFlag) {
   mobileProject = name;
-  document.getElementById('picker').style.display = 'none';
+  hidePicker();
   document.getElementById('mobile-chat').style.display = 'flex';
   document.getElementById('mobile-project-name').textContent = name;
   document.getElementById('mobile-messages').innerHTML = '';
@@ -1427,8 +1527,7 @@ function mobileShowPicker() {
   mobilePollTimer = null;
   mobileLastMsgCount = 0;
   document.getElementById('mobile-chat').style.display = 'none';
-  document.getElementById('picker').style.display = '';
-  loadProjects();
+  showPicker();
 }
 
 let mobileRecognition = null;
