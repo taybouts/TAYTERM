@@ -36,6 +36,45 @@ const ANSI_RE = /\x1b\[[0-9;]*[A-Za-z]|\x1b\].*?\x07|\x1b[()][AB012]|\x1b\[\??[0
 // Per-session PTY sessions: { "ProjectName:claude" or "ProjectName:shell": { pty, subscribers, headlessTerm, ttsTap } }
 const activeTerminals = {};
 
+// TTS project claims — track which projects T-Term is handling TTS for
+const claimedProjects = new Set();
+
+function claimProject(project) {
+    if (claimedProjects.has(project)) return;
+    claimedProjects.add(project);
+    const data = JSON.stringify({ project, claimed: true });
+    const req = http.request({ hostname: '127.0.0.1', port: 7123, path: '/claim-project', method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
+    }, () => {});
+    req.on('error', () => {});
+    req.end(data);
+    log(`Claimed TTS for: ${project}`);
+}
+
+function releaseProject(project) {
+    if (!claimedProjects.has(project)) return;
+    claimedProjects.delete(project);
+    const data = JSON.stringify({ project, claimed: false });
+    const req = http.request({ hostname: '127.0.0.1', port: 7123, path: '/claim-project', method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
+    }, () => {});
+    req.on('error', () => {});
+    req.end(data);
+    log(`Released TTS for: ${project}`);
+}
+
+// Heartbeat every 30s — re-claim all active projects
+setInterval(() => {
+    for (const project of claimedProjects) {
+        const data = JSON.stringify({ project, claimed: true });
+        const req = http.request({ hostname: '127.0.0.1', port: 7123, path: '/claim-project', method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
+        }, () => {});
+        req.on('error', () => {});
+        req.end(data);
+    }
+}, 30000);
+
 // ---------------------------------------------------------------------------
 //  TTS Tap
 // ---------------------------------------------------------------------------
@@ -409,6 +448,11 @@ function startReader(sessionKey) {
         if (activeTerminals[sessionKey]) {
             activeTerminals[sessionKey].pty = null;
         }
+        // Release TTS claim for this project
+        if (sessionKey.endsWith(':claude')) {
+            const proj = sessionKey.split(':')[0];
+            releaseProject(proj);
+        }
     });
 }
 
@@ -652,6 +696,7 @@ async function handleApiKill(req, res) {
             if (entry.pty) {
                 try { entry.pty.kill(); } catch (e) { /* ignore */ }
                 killed.push(keyType);
+                if (keyType === 'claude') releaseProject(name);
             }
             // Notify subscribers
             for (const ws of entry.subscribers) {
@@ -974,6 +1019,11 @@ function handleWebSocket(ws, req) {
         startReader(sessionKey);
         log(`New PTY: ${sessionKey} — ${remoteAddr}`);
         ws.send(JSON.stringify({ type: 'status', data: `new ${sessionType} PTY started` }));
+
+        // Claim TTS for this project (Claude sessions only)
+        if (sessionType === 'claude') {
+            claimProject(projectName);
+        }
 
         // Launch claude if requested (after delay for PowerShell to fully init)
         if (autoClaude || continueClaude || resumeId) {
