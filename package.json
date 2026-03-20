@@ -23,6 +23,8 @@
   },
   "homepage": "https://github.com/taybouts/TAYTERM#readme",
   "dependencies": {
+    "@simplewebauthn/browser": "^13.3.0",
+    "@simplewebauthn/server": "^13.3.0",
     "@xterm/headless": "^6.0.0",
     "node-pty": "^1.1.0",
     "ws": "^8.19.0"
