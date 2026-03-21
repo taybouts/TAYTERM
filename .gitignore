@@ -1,27 +1,24 @@
 # SSL certs
-.tayterm_cert.pem
-.tayterm_key.pem
+*.pem
 
-# Runtime
-.tayterm_server.log
-.tayterm_history/
-.tayterm_uploads/
+# Runtime data
+.tterm_passkeys.json
+favorites.json
+.headless_log*
+.screenshots/
 
-# Old/reference code
-web_terminal.py
-vanilla_terminal.py
-test_terminal.html
-ttyd.exe
-ttyd_runner.bat
+# Dependencies
+node_modules/
 
 # Python
 __pycache__/
 *.pyc
-*.pyo
 
 # OS
 .DS_Store
 Thumbs.db
+*.lnk
+*.tmp.*
 
 # Claude
 .claude/
