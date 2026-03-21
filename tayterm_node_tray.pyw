@@ -1,5 +1,5 @@
 """
-TAYTERM Node Tray — System tray launcher for TAYTERM Node.js server.
+T-Term Tray — System tray launcher for T-Term web terminal.
 Matrix-style icon, launches server.js, opens browser, live log window.
 """
 import os
@@ -43,54 +43,55 @@ def log(msg):
 
 
 # ==========================================
-#  Matrix-style tray icon (Node variant)
+#  T-Term tray icon (design system style)
 # ==========================================
 
 def create_icon_image():
-    """Draw a Matrix rain style icon with N overlay."""
+    """Draw T-Term app icon — blue gradient bg + white terminal prompt (matches design system)."""
     size = 64
     scale = 4
     big = size * scale
-    img = Image.new('RGBA', (big, big), (0, 0, 0, 255))
+    img = Image.new('RGBA', (big, big), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    draw.rounded_rectangle([4, 4, big-4, big-4], radius=28, fill=(5, 15, 5, 255))
 
-    try:
-        font = ImageFont.truetype("consola.ttf", int(12 * scale))
-        font_sm = ImageFont.truetype("consola.ttf", int(9 * scale))
-        font_lg = ImageFont.truetype("consola.ttf", int(18 * scale))
-    except Exception:
-        try:
-            font = ImageFont.truetype("cour.ttf", int(12 * scale))
-            font_sm = ImageFont.truetype("cour.ttf", int(9 * scale))
-            font_lg = ImageFont.truetype("cour.ttf", int(18 * scale))
-        except Exception:
-            font = ImageFont.load_default()
-            font_sm = font
-            font_lg = font
+    # Blue gradient background (simulate with vertical color blend)
+    # #0284c7 (top-left) → #38bdf8 (bottom-right)
+    for y in range(big):
+        t = y / big
+        r = int(2 + (56 - 2) * t)
+        g = int(132 + (189 - 132) * t)
+        b = int(199 + (248 - 199) * t)
+        draw.line([(0, y), (big, y)], fill=(r, g, b, 255))
 
-    random.seed(43)
-    chars = "01>_|/\\{}[]<>:;=+-*"
+    # Apply rounded corners by masking
+    mask = Image.new('L', (big, big), 0)
+    mask_draw = ImageDraw.Draw(mask)
+    mask_draw.rounded_rectangle([0, 0, big, big], radius=48, fill=255)
+    img.putalpha(mask)
 
-    cols = 5
-    col_width = big // cols
-    for c in range(cols):
-        x = c * col_width + col_width // 2
-        num_chars = random.randint(2, 4)
-        start_y = random.randint(0, big // 3)
-        for i in range(num_chars):
-            y = start_y + i * int(13 * scale)
-            if y > big - 10:
-                break
-            ch = random.choice(chars)
-            brightness = int(255 * (i + 1) / num_chars)
-            green = max(60, brightness)
-            alpha = max(40, brightness)
-            color = (0, green, 0, alpha)
-            draw.text((x, y), ch, fill=color, font=font_sm, anchor="mm")
+    # Draw terminal prompt as thick geometric shapes (visible at 16px)
+    draw = ImageDraw.Draw(img)
+    cx, cy = big // 2, big // 2
+    w = 4 * scale  # line thickness
 
-    # Draw "N" for Node in center
-    draw.text((big // 2, big // 2), "N", fill=(0, 255, 70, 255), font=font_lg, anchor="mm")
+    # ">" chevron — two thick lines forming an arrow
+    pts_top = [(cx - 10*scale, cy - 10*scale), (cx + 2*scale, cy), (cx - 10*scale, cy - 10*scale + w)]
+    pts_bot = [(cx - 10*scale, cy + 10*scale), (cx + 2*scale, cy), (cx - 10*scale, cy + 10*scale - w)]
+    # Draw as thick polygon
+    draw.polygon([
+        (cx - 10*scale, cy - 10*scale - w//2),
+        (cx + 4*scale, cy),
+        (cx - 10*scale, cy + 10*scale + w//2),
+        (cx - 10*scale, cy + 10*scale - w*2),
+        (cx - 2*scale, cy),
+        (cx - 10*scale, cy - 10*scale + w*2),
+    ], fill=(255, 255, 255, 255))
+
+    # "_" underscore — thick horizontal line
+    draw.rectangle([
+        cx + 2*scale, cy + 8*scale,
+        cx + 12*scale, cy + 8*scale + w
+    ], fill=(255, 255, 255, 255))
 
     return img.resize((size, size), Image.LANCZOS)
 
@@ -215,30 +216,52 @@ LOG_HTML = '''<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
 <style>
-  :root { --bg: #000; --surface: #050505; --border: #003300; --green: #00ff41; --green-dim: #00cc33; --green-dark: #003300; --red: #ff0040; }
+  :root {
+    --bg: #0a0a0f; --surface: #0d1117; --border: rgba(255,255,255,0.06);
+    --text: #e6edf3; --text2: #475569; --text3: #64748b;
+    --accent: #0284c7; --accent2: #38bdf8; --accent-border: rgba(56,189,248,0.3);
+    --red: #ef4444; --emerald: #22c55e;
+    --glass-bg: rgba(255,255,255,0.03);
+  }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; overflow: hidden; }
-  body { font-family: 'Consolas', 'Courier New', monospace; background: var(--bg); color: var(--green-dim); display: flex; flex-direction: column; }
-  .top-bar { display: flex; align-items: center; background: var(--surface); border-bottom: 1px solid var(--border); padding: 6px 12px; flex-shrink: 0; }
-  .title { font-size: 12px; font-weight: 700; color: var(--green); letter-spacing: 2px; text-transform: uppercase; }
+  body { font-family: 'Share Tech Mono', 'Consolas', monospace; background: var(--bg); color: var(--text); display: flex; flex-direction: column; }
+  .top-bar { display: flex; align-items: center; background: var(--surface); border-bottom: 1px solid var(--border); padding: 8px 14px; flex-shrink: 0; gap: 10px; }
+  .title { font-family: 'Rajdhani', sans-serif; font-size: 14px; font-weight: 700; letter-spacing: 3px; text-transform: uppercase;
+    background: linear-gradient(135deg, var(--accent2), #818cf8);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .status-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .status-dot.online { background: var(--emerald); box-shadow: 0 0 6px rgba(34,197,94,0.5); }
+  .status-dot.offline { background: var(--text3); }
   .top-right { margin-left: auto; display: flex; gap: 6px; }
-  .btn { padding: 3px 10px; font-size: 10px; font-weight: 600; border: 1px solid var(--border); cursor: pointer; background: transparent; color: var(--green-dark); font-family: inherit; letter-spacing: 1px; }
-  .btn:hover { border-color: var(--green); color: var(--green); }
-  .btn-red { border-color: #330010; color: var(--red); }
-  .btn-red:hover { background: var(--red); color: #000; }
-  .btn-green { border-color: var(--green-dark); color: var(--green); }
-  .btn-green:hover { background: var(--green); color: #000; }
-  .log-area { flex: 1; padding: 8px 12px; overflow-y: auto; font-size: 11px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; color: var(--green-dim); user-select: text; -webkit-user-select: text; cursor: text; }
+  .btn { padding: 4px 12px; font-family: 'Share Tech Mono', monospace; font-size: 9px; font-weight: 600;
+    border: 1px solid var(--border); border-radius: 4px; cursor: pointer;
+    background: var(--glass-bg); color: var(--text3); letter-spacing: 1px; text-transform: uppercase;
+    transition: all 0.15s; }
+  .btn:hover { border-color: var(--accent-border); color: var(--accent2); }
+  .btn-red { border-color: rgba(239,68,68,0.3); color: var(--red); }
+  .btn-red:hover { background: rgba(239,68,68,0.1); border-color: var(--red); }
+  .btn-green { border-color: rgba(34,197,94,0.3); color: var(--emerald); }
+  .btn-green:hover { background: rgba(34,197,94,0.1); border-color: var(--emerald); }
+  .log-area { flex: 1; padding: 10px 14px; overflow-y: auto; font-size: 11px; line-height: 1.7;
+    white-space: pre-wrap; word-break: break-all; color: var(--text3);
+    user-select: text; -webkit-user-select: text; cursor: text; }
   .log-area::-webkit-scrollbar { width: 6px; }
-  .log-area::-webkit-scrollbar-track { background: #000; }
-  .log-area::-webkit-scrollbar-thumb { background: var(--green-dark); }
-  .log-area::-webkit-scrollbar-thumb:hover { background: var(--green-dim); }
+  .log-area::-webkit-scrollbar-track { background: transparent; }
+  .log-area::-webkit-scrollbar-thumb { background: rgba(56,189,248,0.15); border-radius: 3px; }
+  .log-area::-webkit-scrollbar-thumb:hover { background: rgba(56,189,248,0.3); }
+  .copied-toast { position: fixed; bottom: 10px; right: 10px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    color: #fff; padding: 4px 14px; font-size: 10px; border-radius: 4px;
+    z-index: 999; opacity: 0; transition: opacity 0.2s; letter-spacing: 1px; }
 </style>
 </head>
 <body>
 <div class="top-bar">
-  <span class="title">TAYTERM NODE LOG</span>
+  <div class="status-dot" id="statusDot"></div>
+  <span class="title">T-TERM</span>
   <div class="top-right">
     <button class="btn" onclick="clearLog()">Clear</button>
     <button class="btn" id="btnStart" onclick="pyApi.start_server().then(updateBtns)">Start</button>
@@ -259,11 +282,14 @@ async function updateBtns() {
     const start = document.getElementById('btnStart');
     const stop = document.getElementById('btnStop');
     const restart = document.getElementById('btnRestart');
+    const dot = document.getElementById('statusDot');
     if (running) {
+      dot.className = 'status-dot online';
       start.className = 'btn'; start.style.opacity = '0.35'; start.style.pointerEvents = 'none';
       stop.className = 'btn btn-red'; stop.style.opacity = ''; stop.style.pointerEvents = '';
       restart.style.opacity = ''; restart.style.pointerEvents = '';
     } else {
+      dot.className = 'status-dot offline';
       start.className = 'btn btn-green'; start.style.opacity = ''; start.style.pointerEvents = '';
       stop.className = 'btn'; stop.style.opacity = '0.35'; stop.style.pointerEvents = 'none';
       restart.style.opacity = '0.35'; restart.style.pointerEvents = 'none';
@@ -308,7 +334,7 @@ document.addEventListener('contextmenu', (e) => {
     window.getSelection().removeAllRanges();
     const msg = document.createElement('div');
     msg.textContent = 'Copied';
-    msg.style.cssText = 'position:fixed;bottom:10px;right:10px;background:#00ff41;color:#000;padding:4px 12px;font-size:10px;border-radius:3px;z-index:999;opacity:0;transition:opacity 0.2s';
+    msg.className = 'copied-toast';
     document.body.appendChild(msg);
     requestAnimationFrame(() => msg.style.opacity = '1');
     setTimeout(() => { msg.style.opacity = '0'; setTimeout(() => msg.remove(), 200); }, 800);
@@ -375,7 +401,7 @@ def run_tray():
         os._exit(0)
 
     menu = pystray.Menu(
-        Item("Open TAYTERM (Node)", on_open, default=True),
+        Item("Open T-TERM", on_open, default=True),
         Item("View Log", on_log),
         pystray.Menu.SEPARATOR,
         Item("Restart Server", on_restart),
@@ -384,7 +410,7 @@ def run_tray():
     )
 
     icon_img = create_icon_image()
-    icon = pystray.Icon("TAYTERM-Node", icon_img, "TAYTERM (Node)", menu)
+    icon = pystray.Icon("TAYTERM-Node", icon_img, "T-TERM", menu)
     icon.run()
 
 
@@ -396,7 +422,7 @@ def main():
     global log_window
 
     log("=" * 36)
-    log("  TAYTERM Node — Web Terminal Server")
+    log("  T-TERM — Web Terminal Server")
     log("=" * 36)
 
     save_ico()
@@ -422,13 +448,13 @@ def main():
     threading.Thread(target=open_when_ready, daemon=True).start()
 
     # Create log window — hidden=True so closing hides instead of quits
-    win_title = "TAYTERM Node Log"
+    win_title = "T-Term Log"
     log_window = webview.create_window(
         win_title, html=LOG_HTML,
         width=640, height=400,
         js_api=LogApi(),
-        background_color='#000000',
-        hidden=False,
+        background_color='#0a0a0f',
+        hidden=True,
         on_top=False,
     )
 

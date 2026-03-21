@@ -11,7 +11,7 @@ const os = require('os');
 const { execSync } = require('child_process');
 const pty = require('node-pty');
 const WebSocket = require('ws');
-const { Terminal: HeadlessTerminal } = require('@xterm/headless');
+// HeadlessTerminal removed — TTS + messenger now use JSONL (structured, clean data)
 const { isAuthenticated, handleAuthRoute, checkWebSocketAuth } = require('./auth');
 
 // Ignore SIGINT like Python version
@@ -29,11 +29,12 @@ const CLAUDE_CMD = 'claude --dangerously-skip-permissions';
 const BASE_DIR = path.dirname(path.resolve(__filename));
 const STATIC_DIR = path.join(BASE_DIR, 'static');
 const TTS_URL = 'http://127.0.0.1:7123';
+const FAVORITES_FILE = path.join(BASE_DIR, 'favorites.json');
 
 // ANSI escape code regex
 const ANSI_RE = /\x1b\[[0-9;]*[A-Za-z]|\x1b\].*?\x07|\x1b[()][AB012]|\x1b\[\??[0-9;]*[hl]|\r/g;
 
-// Per-session PTY sessions: { "ProjectName:claude" or "ProjectName:shell": { pty, subscribers, headlessTerm, ttsTap } }
+// Per-session PTY sessions: { "ProjectName:claude" or "ProjectName:shell": { pty, subscribers, ttsTap } }
 const activeTerminals = {};
 
 // TTS project claims — track which projects T-Term is handling TTS for
@@ -288,7 +289,10 @@ function startReader(sessionKey) {
                                     }
                                 } catch (e) { /* ignore */ }
                             }
-                            // TTS is fed from headless terminal (real-time), not from JSONL (delayed)
+                            // Feed assistant text to TTS (clean, structured data from JSONL)
+                            if (msg.type === 'chat' && msg.role === 'assistant' && ttsTap) {
+                                try { ttsTap.feedClean(msg.text); } catch (e) { /* ignore */ }
+                            }
                         }
                     } catch (e) { /* skip unparseable lines */ }
                 }
@@ -358,89 +362,7 @@ function startReader(sessionKey) {
         });
     }
 
-    // Headless terminal for real-time clean text extraction (TTS + mobile live)
-    const headlessTerm = new HeadlessTerminal({ cols: 120, rows: 30, scrollback: 100 });
-    entry.headlessTerm = headlessTerm;
-    const logFile = path.join(BASE_DIR, '.headless_log.txt');
-
-    // State machine for Claude Code output
-    let outputState = 'IDLE'; // IDLE, SPEAKING, TOOL, THINKING, STATUS
-    const startTime = Date.now();
-    const WARMUP_MS = 5000; // Skip TTS for first 5 seconds (screen replay)
-
-    headlessTerm.onLineFeed(() => {
-        try {
-            const buf = headlessTerm._core.buffer;
-            const lineIdx = buf.ybase + buf.y - 1;
-            if (lineIdx < 0) return;
-            const line = buf.lines.get(lineIdx);
-            if (!line) return;
-            const text = line.translateToString(true).trim();
-            if (!text) return;
-
-            // Skip noise lines — don't change state, don't log
-            if (/[─━═]{2,}/.test(text)) return;
-            if (/^[─━═\-\*✶]{1,3}\s/.test(text)) return;
-            if (/^(Opus|Sonnet|Haiku|Claude)\s+\d|bypass permissions|^\d+\/\d+k|^⏵/.test(text)) return;
-            if (/^[✢✻✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏·]|Clauding|Thinking|Crunched|Cogitated|Brewed|Spelunking|Worked for|Noodling|Fiddle/.test(text)) return;
-            if (/^\d+ files? |ctrl\+o to expand|Interrupted|Searched for|alt\+v to paste|Press up to edit/.test(text)) return;
-
-            // State transitions based on Claude Code markers
-            if (/^[●⦿]/.test(text)) {
-                if (/^[●⦿]\s*(Read|Edit|Write|Bash|Glob|Grep|Agent|Skill|WebSearch|WebFetch|TodoRead|TodoWrite|Update|Search|Explore|Task|NotebookEdit|ToolSearch|SendMessage)\(/.test(text)) {
-                    flushTtsBuffer(); // Flush speech before tool starts
-                    outputState = 'TOOL';
-                } else {
-                    outputState = 'SPEAKING';
-                    const spoken = text.replace(/^[●⦿]\s*/, '').trim();
-                    if (spoken.length > 5) emitCleanText(spoken);
-                }
-            } else if (/^[⎿╰╭▎│]/.test(text)) {
-                flushTtsBuffer(); // Flush speech before tool output
-                outputState = 'TOOL';
-            } else if (/^❯/.test(text)) {
-                flushTtsBuffer(); // Flush speech before user input
-                const userInput = text.replace(/^❯\s*/, '').trim();
-                if (userInput.length > 0) outputState = 'IDLE';
-            } else if (outputState === 'SPEAKING') {
-                if (text.length > 5) emitCleanText(text);
-            }
-
-            // Log AFTER state change
-            fs.appendFileSync(logFile, `[${outputState}] ${text}\n`);
-        } catch (e) { /* ignore */ }
-    });
-
-    let ttsBuffer = '';
-    let ttsFlushTimer = null;
-
-    function flushTtsBuffer() {
-        if (!ttsBuffer.trim() || !ttsTap) return;
-        try { ttsTap.feedClean(ttsBuffer.trim()); } catch (e) { /* ignore */ }
-        ttsBuffer = '';
-    }
-
-    function emitCleanText(text) {
-        // Send to WebSocket subscribers as clean text (immediate)
-        for (const ws of entry.subscribers) {
-            try {
-                if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ type: 'text', data: text }));
-                }
-            } catch (e) { /* ignore */ }
-        }
-        // Accumulate for TTS — flush after 300ms pause (skip warmup)
-        if (ttsTap && (Date.now() - startTime > WARMUP_MS)) {
-            ttsBuffer += ' ' + text;
-            clearTimeout(ttsFlushTimer);
-            ttsFlushTimer = setTimeout(flushTtsBuffer, 300);
-        }
-    }
-
     ptyProc.onData((data) => {
-        // Feed headless terminal
-        headlessTerm.write(data);
-
         // Broadcast raw PTY data to all WebSocket subscribers (for xterm.js on desktop)
         const dead = [];
         for (const ws of entry.subscribers) {
@@ -862,7 +784,9 @@ function handleApiConversation(req, res) {
                         text = msgContent;
                     }
                     if (text.trim()) {
-                        messages.push({ role: 'user', text: text.trim() });
+                        const ts = obj.timestamp ? new Date(obj.timestamp) : null;
+                        const time = ts ? ts.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+                        messages.push({ role: 'user', text: text.trim(), time });
                     }
                 } else if (entryType === 'assistant') {
                     const msgContent = obj.message?.content || [];
@@ -882,14 +806,16 @@ function handleApiConversation(req, res) {
                         }
                     }
                     if (text.trim()) {
-                        messages.push({ role: 'assistant', text: text.trim() });
+                        const ts = obj.timestamp ? new Date(obj.timestamp) : null;
+                        const time = ts ? ts.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+                        messages.push({ role: 'assistant', text: text.trim(), time });
                     }
                 }
             } catch (e) { /* skip malformed lines */ }
         }
     } catch (e) { /* ignore */ }
 
-    sendJson(res, messages.slice(-50));
+    sendJson(res, messages.slice(-200));
 }
 
 async function handleApiNewProject(req, res) {
@@ -975,7 +901,9 @@ async function handleUpload(req, res) {
     fs.writeFileSync(savePath, fields.file.data);
     const size = fs.statSync(savePath).size;
     log(`Upload: ${savePath} (${size} bytes)`);
-    sendJson(res, { path: savePath });
+    const relPath = path.relative(PROJECTS_DIR, savePath).replace(/\\/g, '/');
+    const url = '/screenshots/' + encodeURI(relPath);
+    sendJson(res, { path: savePath, url });
 }
 
 // ---------------------------------------------------------------------------
@@ -1030,7 +958,7 @@ function handleWebSocket(ws, req) {
             conptyInheritCursor: true,
         });
 
-        entry = { pty: ptyProc, subscribers: new Set(), headlessTerm: null, ttsTap: null };
+        entry = { pty: ptyProc, subscribers: new Set(), ttsTap: null };
         activeTerminals[sessionKey] = entry;
         startReader(sessionKey);
         log(`New PTY: ${sessionKey} — ${remoteAddr}`);
@@ -1108,7 +1036,7 @@ async function requestHandler(req, res) {
 
     // Auth routes are always accessible
     const authPaths = ['/auth/', '/login', '/approve', '/do-approve', '/check', '/register'];
-    if (authPaths.some(p => pathname === p || pathname.startsWith(p + '/') || pathname.startsWith(p + '?'))) {
+    if (authPaths.some(p => pathname === p || pathname.startsWith(p + '/') || pathname.startsWith(p + '?')) || pathname.startsWith('/auth/')) {
         const handled = await handleAuthRoute(req, res, pathname);
         if (handled) return;
     }
@@ -1143,8 +1071,32 @@ async function requestHandler(req, res) {
             await handleApiNewProject(req, res);
         } else if (req.method === 'GET' && pathname === '/api/claude-logo') {
             handleClaudeLogo(req, res);
+        } else if (req.method === 'GET' && pathname === '/api/favorites') {
+            try {
+                const favs = fs.existsSync(FAVORITES_FILE) ? JSON.parse(fs.readFileSync(FAVORITES_FILE, 'utf-8')) : [];
+                sendJson(res, favs);
+            } catch(e) { sendJson(res, []); }
+        } else if (req.method === 'POST' && pathname === '/api/favorites') {
+            const body = await readBody(req);
+            try {
+                const favs = JSON.parse(body.toString('utf-8'));
+                fs.writeFileSync(FAVORITES_FILE, JSON.stringify(favs, null, 2));
+                sendJson(res, { ok: true });
+            } catch(e) { sendJson(res, { error: 'invalid data' }, 400); }
         } else if (req.method === 'POST' && pathname === '/upload') {
             await handleUpload(req, res);
+        } else if (req.method === 'GET' && pathname.startsWith('/screenshots/')) {
+            // Serve screenshot files: /screenshots/PROJECT/.screenshots/sm/filename.jpg
+            const relPath = decodeURIComponent(pathname.slice('/screenshots/'.length));
+            const filePath = path.join(PROJECTS_DIR, relPath);
+            if (fs.existsSync(filePath)) {
+                const ext = path.extname(filePath).toLowerCase();
+                const mimeTypes = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp' };
+                res.writeHead(200, { 'Content-Type': mimeTypes[ext] || 'application/octet-stream' });
+                res.end(fs.readFileSync(filePath));
+            } else {
+                res.writeHead(404); res.end('Not found');
+            }
         } else {
             res.writeHead(404);
             res.end('Not found');

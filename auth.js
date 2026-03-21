@@ -73,17 +73,37 @@ function hasPasskeys() {
 
 function getRpConfig(req) {
     const host = req.headers.host || 'localhost';
-    if (host.includes('taybouts.com')) {
+    const fwdHost = req.headers['x-forwarded-host'] || '';
+    const referer = req.headers.referer || '';
+    const fwdProto = req.headers['x-forwarded-proto'] || '';
+    const cfHost = req.headers['x-original-host'] || req.headers['cf-host'] || '';
+    console.log(`[AUTH RP] host=${host} fwdHost=${fwdHost} cfHost=${cfHost} referer=${referer}`);
+    // Check all possible indicators for taybouts.com (Cloudflare Tunnel may change Host header)
+    // Tailscale MagicDNS
+    if (host.includes('tse.mesh') || fwdHost.includes('tse.mesh')) {
+        const tsHost = host.split(':')[0];
+        console.log(`[AUTH RP] Tailscale detected, using rpID=tse.mesh origin=https://${host}`);
+        return {
+            rpID: 'tse.mesh',
+            rpName: 'T-Term',
+            origin: `https://${host}`,
+        };
+    }
+    if (host.includes('taybouts.com') || fwdHost.includes('taybouts.com') || referer.includes('taybouts.com') || cfHost.includes('taybouts.com') || req.headers['cf-connecting-ip']) {
+        // Detect actual subdomain from headers for correct origin
+        const actualHost = [host, fwdHost, cfHost].find(h => h.includes('taybouts.com')) || 'term.taybouts.com';
+        const cleanHost = actualHost.split(':')[0];
+        console.log(`[AUTH RP] Detected taybouts.com, using origin=https://${cleanHost}`);
         return {
             rpID: 'taybouts.com',
-            rpName: 'T-Server',
-            origin: 'https://term.taybouts.com',
+            rpName: 'T-Term',
+            origin: `https://${cleanHost}`,
         };
     }
     const port = host.split(':')[1] || '7778';
     return {
         rpID: 'localhost',
-        rpName: 'TayTerm',
+        rpName: 'T-Term',
         origin: `https://localhost:${port}`,
     };
 }
@@ -120,8 +140,11 @@ function getSessionFromCookie(req) {
     return match ? match[1] : null;
 }
 
-function setSessionCookie(res, sessionId) {
-    const cookie = `${COOKIE_NAME}=${sessionId}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${SESSION_MAX_AGE}`;
+function setSessionCookie(res, sessionId, req) {
+    const rpConfig = getRpConfig(req || {headers:{}});
+    const domain = rpConfig.rpID === 'taybouts.com' ? '; Domain=.taybouts.com' : '';
+    const sameSite = rpConfig.rpID === 'taybouts.com' ? 'None' : 'Strict';
+    const cookie = `${COOKIE_NAME}=${sessionId}; HttpOnly; Secure; SameSite=${sameSite}; Path=/; Max-Age=${SESSION_MAX_AGE}${domain}`;
     const existing = res.getHeader('Set-Cookie') || [];
     const cookies = Array.isArray(existing) ? existing : (existing ? [existing] : []);
     cookies.push(cookie);
@@ -129,7 +152,7 @@ function setSessionCookie(res, sessionId) {
 }
 
 function clearSessionCookie(res) {
-    const cookie = `${COOKIE_NAME}=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0`;
+    const cookie = `${COOKIE_NAME}=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0; Domain=.taybouts.com`;
     res.setHeader('Set-Cookie', cookie);
 }
 
@@ -219,6 +242,50 @@ async function handleAuthRoute(req, res, pathname) {
         return handleStatus(req, res);
     }
 
+    // Sessions management page
+    if (req.method === 'GET' && pathname === '/auth/sessions') {
+        return serveSessionsPage(req, res);
+    }
+
+    // Sessions API — list active sessions
+    if (req.method === 'GET' && pathname === '/auth/sessions-list') {
+        const currentSessionId = getSessionFromCookie(req);
+        const list = [];
+        for (const [sid, data] of activeSessions) {
+            const ua = data.userAgent || '';
+            const browser = ua.match(/Chrome|Firefox|Safari|Edge|Opera/)?.[0] || 'Unknown';
+            const os = ua.match(/Windows|Mac|Linux|Android|iPhone|iPad/)?.[0] || 'Unknown';
+            list.push({
+                id: sid.slice(0, 8),
+                fullId: sid,
+                ip: data.ip,
+                browser, os,
+                created: data.created,
+                expires: data.expires,
+                isCurrent: sid === currentSessionId,
+            });
+        }
+        list.sort((a, b) => b.created - a.created);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(list));
+        return true;
+    }
+
+    // Kill a session
+    if (req.method === 'POST' && pathname === '/auth/kill-session') {
+        const body = await readBody(req);
+        const { sessionId } = JSON.parse(body.toString('utf-8'));
+        if (sessionId && activeSessions.has(sessionId)) {
+            activeSessions.delete(sessionId);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true }));
+        } else {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Session not found' }));
+        }
+        return true;
+    }
+
     return false;
 }
 
@@ -245,10 +312,10 @@ async function serveLoginPage(req, res) {
     const token = crypto.randomUUID();
     pendingSessions.set(token, { approved: false, created: Date.now(), sessionId: null });
 
-    // Build QR URL
-    const host = req.headers.host || 'localhost';
-    const proto = 'https';
-    const approveUrl = `${proto}://${host}/approve?token=${token}`;
+    // Build QR URL — Tailscale MagicDNS for local, term.taybouts.com for external
+    const rpConfig = getRpConfig(req);
+    const approveHost = rpConfig.rpID === 'taybouts.com' ? 'term.taybouts.com' : 'term.taybouts.com';
+    const approveUrl = `https://${approveHost}/approve?token=${token}`;
 
     let qrDataUrl;
     try {
@@ -268,6 +335,12 @@ async function serveLoginPage(req, res) {
     return true;
 }
 
+function isTailscaleRequest(req) {
+    const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '';
+    const host = req.headers.host || '';
+    return ip.startsWith('100.64.') || ip.startsWith('100.100.') || host.includes('tse.mesh');
+}
+
 function serveApprovePage(req, res, url) {
     const token = url.searchParams.get('token');
     if (!token || !pendingSessions.has(token)) {
@@ -281,6 +354,29 @@ function serveApprovePage(req, res, url) {
         pendingSessions.delete(token);
         res.writeHead(410, { 'Content-Type': 'text/html' });
         res.end('<h1>Link expired</h1>');
+        return true;
+    }
+
+    // Auto-approve for Tailscale — already authenticated by mesh network
+    if (isTailscaleRequest(req)) {
+        const sessionId = createSession(req);
+        pending.approved = true;
+        pending.sessionId = sessionId;
+        console.log(`[AUTH] Auto-approved via Tailscale (${req.socket.remoteAddress})`);
+        res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
+        res.end(`<!DOCTYPE html><html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>T-TERM — Approved</title>
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>*{margin:0;padding:0;box-sizing:border-box}body{min-height:100vh;background:#0a0a0f;color:#e6edf3;display:flex;align-items:center;justify-content:center;font-family:'Segoe UI',sans-serif}
+.card{text-align:center;padding:48px 40px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:24px;backdrop-filter:blur(20px);max-width:340px;width:90%}
+.logo{font-family:'Rajdhani',sans-serif;font-size:32px;font-weight:700;letter-spacing:8px;background:linear-gradient(135deg,#38bdf8,#818cf8,#c084fc);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:8px}
+.check{font-size:48px;margin:16px 0;animation:pop 0.4s ease}
+@keyframes pop{from{transform:scale(0)}to{transform:scale(1)}}
+.msg{font-size:14px;color:#94a3b8;line-height:1.6}
+.sub{font-family:'Share Tech Mono',monospace;font-size:10px;color:#475569;margin-top:16px;letter-spacing:2px}</style></head>
+<body><div class="card"><div class="logo">T-TERM</div><div class="check">&#9989;</div>
+<div class="msg">Access granted</div><div class="sub">You can close this page</div></div></body></html>`);
         return true;
     }
 
@@ -424,7 +520,7 @@ function handleCheck(req, res, url) {
 
     if (pending.approved && pending.sessionId) {
         // Set session cookie on the desktop browser that's polling
-        setSessionCookie(res, pending.sessionId);
+        setSessionCookie(res, pending.sessionId, req);
         sendJson(res, { approved: true });
         // Clean up — token is consumed
         pendingSessions.delete(token);
@@ -451,7 +547,9 @@ async function handleRegisterStart(req, res) {
         return true;
     }
 
-    const { rpID, rpName } = getRpConfig(req);
+    const rpConfig = getRpConfig(req);
+    const { rpID, rpName } = rpConfig;
+    console.log(`[AUTH REGISTER] Using rpID=${rpID} rpName=${rpName} host=${req.headers.host} x-forwarded-host=${req.headers['x-forwarded-host']} cf-connecting-ip=${req.headers['cf-connecting-ip']}`);
     const data = loadPasskeys();
     const existingCreds = (data.passkeys || []).map(pk => ({
         id: pk.credentialID,
@@ -545,7 +643,7 @@ async function handleRegisterFinish(req, res) {
 
         // Create session immediately after registration
         const sessionId = createSession(req);
-        setSessionCookie(res, sessionId);
+        setSessionCookie(res, sessionId, req);
 
         sendJson(res, { verified: true, backupCodes });
     } catch (e) {
@@ -601,7 +699,8 @@ function loginPageHTML(token, qrDataUrl) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>T-SERVER — Sign In</title>
+<title>T-TERM — Sign In</title>
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
 <style>
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 body {
@@ -619,70 +718,108 @@ body::before {
         linear-gradient(90deg, rgba(56, 189, 248, 0.03) 1px, transparent 1px);
     background-size: 60px 60px; z-index: 0;
 }
+body::after {
+    content: ''; position: fixed; width: 100%; height: 2px; left: 0;
+    background: linear-gradient(90deg, transparent, rgba(56,189,248,0.06), transparent);
+    animation: scan 8s linear infinite; z-index: 0; pointer-events: none;
+}
+@keyframes scan { from { top: -2px; } to { top: 100%; } }
 .container {
     position: relative; z-index: 1; text-align: center;
-    background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 24px; padding: 48px 40px; backdrop-filter: blur(20px);
-    max-width: 400px; width: 90%;
+    background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 24px; padding: 48px 44px; backdrop-filter: blur(20px);
+    max-width: 420px; width: 90%;
+    animation: containerIn 0.8s ease;
 }
+@keyframes containerIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
 .logo {
-    font-size: 32px; font-weight: 700; letter-spacing: 4px;
+    font-family: 'Rajdhani', sans-serif; font-size: 48px; font-weight: 700;
+    letter-spacing: 12px; text-transform: uppercase;
     background: linear-gradient(135deg, #38bdf8 0%, #818cf8 50%, #c084fc 100%);
     -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-    margin-bottom: 8px;
+    background-clip: text;
+    margin-bottom: 4px;
+    animation: titleIn 1s ease; animation-fill-mode: both;
 }
-.subtitle { font-size: 12px; letter-spacing: 3px; color: #475569; margin-bottom: 36px; text-transform: uppercase; }
+@keyframes titleIn { from { opacity: 0; letter-spacing: 20px; } to { opacity: 1; letter-spacing: 12px; } }
+.subtitle {
+    font-family: 'Share Tech Mono', monospace; font-size: 11px;
+    letter-spacing: 6px; color: #475569; margin-bottom: 40px; text-transform: uppercase;
+    animation: fadeIn 1s ease 0.2s; animation-fill-mode: both;
+}
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 .qr-container {
     background: white; border-radius: 16px; padding: 16px; display: inline-block;
     margin-bottom: 24px;
     box-shadow: 0 0 40px rgba(56, 189, 248, 0.1);
-    animation: pulse 3s ease-in-out infinite;
+    animation: pulse 3s ease-in-out infinite, fadeIn 0.8s ease 0.4s both;
 }
 .qr-container img { display: block; border-radius: 8px; width: 220px; height: 220px; }
-.scan-text { font-size: 14px; color: #94a3b8; margin-bottom: 8px; }
-.scan-hint { font-size: 11px; color: #475569; }
+.scan-text {
+    font-family: 'Segoe UI', sans-serif; font-size: 14px; color: #94a3b8; margin-bottom: 6px;
+    animation: fadeIn 1s ease 0.5s both;
+}
+.scan-hint {
+    font-family: 'Share Tech Mono', monospace; font-size: 10px; color: #475569;
+    letter-spacing: 1px;
+    animation: fadeIn 1s ease 0.6s both;
+}
 .status {
     margin-top: 24px; padding: 12px 20px; border-radius: 8px;
-    font-size: 13px; letter-spacing: 1px;
+    font-family: 'Share Tech Mono', monospace; font-size: 12px; letter-spacing: 1px;
+    animation: fadeIn 1s ease 0.7s both;
 }
-.waiting { background: rgba(56, 189, 248, 0.1); border: 1px solid rgba(56, 189, 248, 0.2); color: #38bdf8; }
-.approved { background: rgba(52, 211, 153, 0.1); border: 1px solid rgba(52, 211, 153, 0.2); color: #34d399; }
+.waiting { background: rgba(56, 189, 248, 0.08); border: 1px solid rgba(56, 189, 248, 0.2); color: #38bdf8; }
+.approved { background: rgba(34, 197, 94, 0.08); border: 1px solid rgba(34, 197, 94, 0.2); color: #22c55e; }
 @keyframes pulse {
     0%, 100% { box-shadow: 0 0 20px rgba(56, 189, 248, 0.1); }
-    50% { box-shadow: 0 0 40px rgba(56, 189, 248, 0.25); }
+    50% { box-shadow: 0 0 50px rgba(56, 189, 248, 0.2); }
 }
-.orb { position: absolute; border-radius: 50%; filter: blur(80px); opacity: 0.12; z-index: 0; }
-.orb1 { width: 300px; height: 300px; background: #38bdf8; top: -100px; left: -100px; }
-.orb2 { width: 200px; height: 200px; background: #c084fc; bottom: -50px; right: -50px; }
+.orb { position: absolute; border-radius: 50%; filter: blur(100px); opacity: 0.08; z-index: 0; }
+.orb1 { width: 400px; height: 400px; background: #38bdf8; top: -150px; left: -150px; }
+.orb2 { width: 300px; height: 300px; background: #c084fc; bottom: -100px; right: -100px; }
+.orb3 { width: 200px; height: 200px; background: #818cf8; top: 50%; left: 60%; }
+.hud { position: fixed; width: 28px; height: 28px; z-index: 2; pointer-events: none; opacity: 0.15; }
+.hud::before, .hud::after { content: ''; position: absolute; background: #38bdf8; }
+.hud-tl { top: 10px; left: 10px; } .hud-tl::before { width: 18px; height: 1px; } .hud-tl::after { width: 1px; height: 18px; }
+.hud-tr { top: 10px; right: 10px; } .hud-tr::before { width: 18px; height: 1px; right: 0; } .hud-tr::after { width: 1px; height: 18px; right: 0; }
+.hud-bl { bottom: 10px; left: 10px; } .hud-bl::before { width: 18px; height: 1px; bottom: 0; } .hud-bl::after { width: 1px; height: 18px; bottom: 0; }
+.hud-br { bottom: 10px; right: 10px; } .hud-br::before { width: 18px; height: 1px; right: 0; bottom: 0; } .hud-br::after { width: 1px; height: 18px; right: 0; bottom: 0; }
 .divider { border: none; border-top: 1px solid rgba(255,255,255,0.06); margin: 24px 0; }
 .backup-link {
-    font-size: 12px; color: #475569; cursor: pointer; text-decoration: none;
+    font-family: 'Share Tech Mono', monospace; font-size: 10px; letter-spacing: 1px;
+    color: #475569; cursor: pointer; text-decoration: none; text-transform: uppercase;
     transition: color 0.2s;
 }
-.backup-link:hover { color: #94a3b8; }
+.backup-link:hover { color: #38bdf8; }
 #backup-section { display: none; margin-top: 16px; }
 .backup-input {
-    width: 100%; padding: 12px; background: rgba(255,255,255,0.05);
-    color: #e6edf3; border: 1px solid rgba(255,255,255,0.1); border-radius: 8px;
-    font-family: 'Consolas', monospace; font-size: 16px; text-align: center;
-    letter-spacing: 3px; text-transform: uppercase; margin-bottom: 12px;
+    width: 100%; padding: 12px; background: rgba(255,255,255,0.04);
+    color: #e6edf3; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px;
+    font-family: 'Share Tech Mono', monospace; font-size: 16px; text-align: center;
+    letter-spacing: 4px; text-transform: uppercase; margin-bottom: 12px;
 }
 .backup-input:focus { outline: none; border-color: rgba(56, 189, 248, 0.4); }
 .btn-backup {
     display: inline-block; padding: 10px 32px; border-radius: 8px; border: none;
-    background: linear-gradient(135deg, #38bdf8, #818cf8);
-    color: white; font-size: 14px; font-weight: 600; cursor: pointer;
-    letter-spacing: 1px; transition: all 0.3s;
+    background: linear-gradient(135deg, #0284c7, #38bdf8);
+    color: white; font-family: 'Share Tech Mono', monospace; font-size: 11px;
+    font-weight: 600; cursor: pointer; letter-spacing: 2px; text-transform: uppercase;
+    transition: all 0.3s;
 }
+.btn-backup:hover { box-shadow: 0 4px 16px rgba(2, 132, 199, 0.3); }
 .btn-backup:active { transform: scale(0.97); }
-.error { color: #f87171; margin-top: 12px; font-size: 13px; display: none; }
+.error { color: #ef4444; margin-top: 12px; font-size: 12px; font-family: 'Share Tech Mono', monospace; display: none; }
 </style>
 </head>
 <body>
+<div class="hud hud-tl"></div><div class="hud hud-tr"></div>
+<div class="hud hud-bl"></div><div class="hud hud-br"></div>
 <div class="orb orb1"></div>
 <div class="orb orb2"></div>
+<div class="orb orb3"></div>
 <div class="container">
-    <div class="logo">T-SERVER</div>
+    <div class="logo">T-TERM</div>
     <div class="subtitle">Secure Access</div>
     <div id="qr-section">
         <div class="qr-container">
@@ -764,6 +901,165 @@ document.getElementById('backup-code').addEventListener('keydown', e => {
 }
 
 // ---------------------------------------------------------------------------
+//  Sessions Management Page
+// ---------------------------------------------------------------------------
+
+function serveSessionsPage(req, res) {
+    if (!isAuthenticated(req)) {
+        res.writeHead(302, { Location: '/login' });
+        res.end();
+        return true;
+    }
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(sessionsPageHTML());
+    return true;
+}
+
+function sessionsPageHTML() {
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>T-TERM — Sessions</title>
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    min-height: 100vh;
+    background: linear-gradient(135deg, #0a0a0f 0%, #0d1117 30%, #0a0f1a 60%, #0a0a0f 100%);
+    font-family: 'Segoe UI', Arial, sans-serif; color: #e6edf3;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 40px 20px; position: relative;
+}
+body::before {
+    content: ''; position: fixed; inset: 0;
+    background-image: linear-gradient(rgba(56,189,248,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(56,189,248,0.03) 1px, transparent 1px);
+    background-size: 60px 60px; z-index: 0; pointer-events: none;
+}
+.container { position: relative; z-index: 1; max-width: 600px; width: 100%; }
+.header {
+    display: flex; align-items: center; gap: 16px; margin-bottom: 32px;
+}
+.logo {
+    font-family: 'Rajdhani', sans-serif; font-size: 28px; font-weight: 700;
+    letter-spacing: 6px; text-transform: uppercase;
+    background: linear-gradient(135deg, #38bdf8, #818cf8, #c084fc);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+}
+.subtitle {
+    font-family: 'Share Tech Mono', monospace; font-size: 10px;
+    letter-spacing: 3px; color: #475569; text-transform: uppercase;
+}
+.back-btn {
+    margin-left: auto; font-family: 'Share Tech Mono', monospace; font-size: 10px;
+    letter-spacing: 1px; color: #475569; text-decoration: none;
+    border: 1px solid rgba(255,255,255,0.06); padding: 6px 14px;
+    border-radius: 6px; background: rgba(255,255,255,0.03); cursor: pointer;
+    transition: all 0.15s; text-transform: uppercase;
+}
+.back-btn:hover { border-color: rgba(56,189,248,0.3); color: #38bdf8; }
+.session-card {
+    background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 12px; padding: 16px 20px; margin-bottom: 8px;
+    display: flex; align-items: center; gap: 14px;
+    transition: all 0.15s; animation: cardIn 0.3s ease both;
+}
+@keyframes cardIn { from { opacity: 0; transform: translateY(8px); } }
+.session-card.current { border-color: rgba(56,189,248,0.25); }
+.session-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: #22c55e; box-shadow: 0 0 6px rgba(34,197,94,0.5); }
+.session-card.current .session-dot { background: #38bdf8; box-shadow: 0 0 6px rgba(56,189,248,0.5); }
+.session-info { flex: 1; min-width: 0; }
+.session-label {
+    font-family: 'Share Tech Mono', monospace; font-size: 12px;
+    color: #e6edf3; letter-spacing: 0.5px; margin-bottom: 3px;
+}
+.session-meta {
+    font-family: 'Share Tech Mono', monospace; font-size: 10px;
+    color: #475569; display: flex; gap: 10px; flex-wrap: wrap;
+}
+.session-tag {
+    font-family: 'Share Tech Mono', monospace; font-size: 9px;
+    padding: 2px 8px; border-radius: 4px; letter-spacing: 0.5px;
+}
+.tag-current { background: rgba(56,189,248,0.1); color: #38bdf8; border: 1px solid rgba(56,189,248,0.2); }
+.kill-btn {
+    font-family: 'Share Tech Mono', monospace; font-size: 9px;
+    padding: 4px 12px; border-radius: 4px; letter-spacing: 1px;
+    border: 1px solid rgba(239,68,68,0.3); background: none;
+    color: #ef4444; cursor: pointer; text-transform: uppercase;
+    transition: all 0.15s; opacity: 0;
+}
+.session-card:hover .kill-btn { opacity: 1; }
+.kill-btn:hover { background: rgba(239,68,68,0.1); border-color: #ef4444; }
+.empty {
+    text-align: center; padding: 40px;
+    font-family: 'Share Tech Mono', monospace; font-size: 12px;
+    color: #475569; letter-spacing: 1px;
+}
+.count {
+    font-family: 'Share Tech Mono', monospace; font-size: 10px;
+    color: #475569; letter-spacing: 1px; margin-bottom: 16px;
+    text-transform: uppercase;
+}
+</style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <div>
+            <div class="logo">T-TERM</div>
+            <div class="subtitle">Active Sessions</div>
+        </div>
+        <a class="back-btn" href="/">Back to terminal</a>
+    </div>
+    <div class="count" id="count"></div>
+    <div id="sessions"></div>
+</div>
+<script>
+async function load() {
+    const resp = await fetch('/auth/sessions-list');
+    const sessions = await resp.json();
+    const el = document.getElementById('sessions');
+    document.getElementById('count').textContent = sessions.length + ' active session' + (sessions.length !== 1 ? 's' : '');
+    if (sessions.length === 0) {
+        el.innerHTML = '<div class="empty">No active sessions</div>';
+        return;
+    }
+    el.innerHTML = sessions.map((s, i) => {
+        const created = new Date(s.created).toLocaleString();
+        const expires = new Date(s.expires).toLocaleString();
+        const remaining = Math.max(0, Math.round((s.expires - Date.now()) / 60000));
+        return '<div class="session-card' + (s.isCurrent ? ' current' : '') + '" style="animation-delay:' + (i * 0.05) + 's">' +
+            '<div class="session-dot"></div>' +
+            '<div class="session-info">' +
+                '<div class="session-label">' + s.browser + ' on ' + s.os + (s.isCurrent ? ' <span class="session-tag tag-current">THIS DEVICE</span>' : '') + '</div>' +
+                '<div class="session-meta"><span>IP: ' + s.ip + '</span><span>ID: ' + s.id + '</span><span>' + remaining + 'min left</span></div>' +
+            '</div>' +
+            (s.isCurrent ? '' : '<button class="kill-btn" onclick="killSession(\\'' + s.fullId + '\\', this)">Revoke</button>') +
+        '</div>';
+    }).join('');
+}
+
+async function killSession(id, btn) {
+    btn.textContent = '...';
+    await fetch('/auth/kill-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: id })
+    });
+    load();
+}
+
+load();
+setInterval(load, 10000);
+</script>
+</body>
+</html>`;
+}
+
+// ---------------------------------------------------------------------------
 //  Approve Page HTML (Phone — Face ID via WebAuthn)
 // ---------------------------------------------------------------------------
 
@@ -773,46 +1069,81 @@ function approvePageHTML(token) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Approve Login</title>
+<title>T-TERM — Approve</title>
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
 <style>
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 body {
     min-height: 100vh;
     background: linear-gradient(135deg, #0a0a0f 0%, #0d1117 50%, #0a0a0f 100%);
-    font-family: 'Segoe UI', Arial, sans-serif;
-    color: #e6edf3;
+    font-family: 'Segoe UI', Arial, sans-serif; color: #e6edf3;
     display: flex; align-items: center; justify-content: center;
+    position: relative; overflow: hidden;
 }
+body::before {
+    content: ''; position: fixed; inset: 0;
+    background-image: linear-gradient(rgba(56,189,248,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(56,189,248,0.03) 1px, transparent 1px);
+    background-size: 60px 60px; z-index: 0; pointer-events: none;
+}
+.orb { position: absolute; border-radius: 50%; filter: blur(100px); opacity: 0.08; z-index: 0; }
+.orb1 { width: 300px; height: 300px; background: #38bdf8; top: -100px; left: -80px; }
+.orb2 { width: 200px; height: 200px; background: #c084fc; bottom: -60px; right: -40px; }
 .container {
-    text-align: center; padding: 40px 32px;
-    background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 24px; max-width: 340px; width: 90%;
-    backdrop-filter: blur(20px);
+    text-align: center; padding: 44px 36px;
+    background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 24px; max-width: 360px; width: 92%;
+    backdrop-filter: blur(20px); position: relative; z-index: 1;
+    animation: containerIn 0.6s ease;
 }
+@keyframes containerIn { from { opacity: 0; transform: translateY(16px); } }
 .logo {
-    font-size: 24px; font-weight: 700; letter-spacing: 3px;
-    background: linear-gradient(135deg, #38bdf8, #c084fc);
+    font-family: 'Rajdhani', sans-serif; font-size: 32px; font-weight: 700;
+    letter-spacing: 8px; text-transform: uppercase;
+    background: linear-gradient(135deg, #38bdf8, #818cf8, #c084fc);
     -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-    margin-bottom: 24px;
+    margin-bottom: 4px;
 }
-.icon { font-size: 48px; margin-bottom: 16px; }
-.message { font-size: 14px; color: #94a3b8; margin-bottom: 32px; line-height: 1.6; }
+.subtitle {
+    font-family: 'Share Tech Mono', monospace; font-size: 10px;
+    letter-spacing: 4px; color: #475569; text-transform: uppercase; margin-bottom: 28px;
+}
+.icon {
+    font-size: 44px; margin-bottom: 16px;
+    animation: fadeIn 0.6s ease 0.2s both;
+}
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+.message {
+    font-size: 14px; color: #94a3b8; margin-bottom: 28px; line-height: 1.6;
+    animation: fadeIn 0.6s ease 0.3s both;
+}
 .btn {
-    display: inline-block; padding: 16px 48px; border-radius: 12px; border: none;
-    background: linear-gradient(135deg, #38bdf8, #818cf8);
-    color: white; font-size: 16px; font-weight: 600; cursor: pointer;
-    letter-spacing: 1px; transition: all 0.3s; width: 100%;
+    display: block; width: 100%; padding: 16px; border-radius: 12px; border: none;
+    background: linear-gradient(135deg, #0284c7, #38bdf8);
+    color: white; font-family: 'Rajdhani', sans-serif; font-size: 16px;
+    font-weight: 700; cursor: pointer; letter-spacing: 2px; text-transform: uppercase;
+    transition: all 0.3s; animation: fadeIn 0.6s ease 0.4s both;
 }
+.btn:hover { box-shadow: 0 4px 20px rgba(2,132,199,0.3); }
 .btn:active { transform: scale(0.97); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn.done { background: linear-gradient(135deg, #059669, #34d399); }
-.error { color: #f87171; margin-top: 16px; font-size: 13px; display: none; }
-.status { color: #94a3b8; margin-top: 12px; font-size: 13px; }
+.btn.done { background: linear-gradient(135deg, #059669, #22c55e); }
+.error {
+    color: #ef4444; margin-top: 16px;
+    font-family: 'Share Tech Mono', monospace; font-size: 11px; display: none;
+}
+.status {
+    color: #475569; margin-top: 12px;
+    font-family: 'Share Tech Mono', monospace; font-size: 11px; letter-spacing: 1px;
+}
 </style>
 </head>
 <body>
+<div class="orb orb1"></div>
+<div class="orb orb2"></div>
 <div class="container">
-    <div class="logo">T-SERVER</div>
+    <div class="logo">T-TERM</div>
+    <div class="subtitle">Approve Access</div>
     <div class="icon" id="icon">&#128274;</div>
     <div class="message" id="msg">A device is requesting access to your terminal</div>
     <button class="btn" id="btn" onclick="approve()">Approve Login</button>
@@ -895,7 +1226,8 @@ const REGISTER_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>T-SERVER — Register Device</title>
+<title>T-TERM — Register Device</title>
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
 <style>
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 body {
@@ -975,8 +1307,8 @@ body::before {
 <div class="orb orb1"></div>
 <div class="orb orb2"></div>
 <div class="container">
-    <div class="logo">T-SERVER</div>
-    <div class="subtitle">First-time Setup</div>
+    <div class="logo" style="font-family:'Rajdhani',sans-serif;font-size:32px;font-weight:700;letter-spacing:8px;text-transform:uppercase">T-TERM</div>
+    <div class="subtitle" style="font-family:'Share Tech Mono',monospace;font-size:10px;letter-spacing:4px">First-time Setup</div>
 
     <div id="register-section">
         <div class="description">
@@ -990,7 +1322,7 @@ body::before {
         <h3>BACKUP CODES</h3>
         <p>Save these codes somewhere safe. Each can be used once if you lose your device.</p>
         <div class="code-grid" id="code-grid"></div>
-        <button class="btn-continue" onclick="window.location='/'">Continue to T-SERVER</button>
+        <button class="btn-continue" onclick="window.location='/'">Continue to T-TERM</button>
     </div>
 
     <div class="error" id="error"></div>
