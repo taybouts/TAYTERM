@@ -14,6 +14,7 @@
 <link rel="manifest" href="/static/manifest.json">
 <meta name="theme-color" content="#0a0a0f">
 <link rel="stylesheet" href="/static/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 </head>
 <body>
 
@@ -115,7 +116,7 @@
     <div class="toolbar-right">
       <div class="view-toggle">
         <button class="view-btn active" data-view="messenger" onclick="setViewMode('messenger')">Messenger</button>
-        <button class="view-btn" data-view="terminal" onclick="setViewMode('terminal')">Terminal</button>
+        <button class="view-btn" data-view="terminal" onclick="setViewMode('terminal')" oncontextmenu="event.preventDefault();setViewMode('split')">Terminal</button>
       </div>
       <div class="toolbar-sep"></div>
       <div class="layout-btns" id="layout-btns">
@@ -141,6 +142,7 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
         </button>
         <div id="screenshot-dropdown">
+          <button onclick="doPageScreenshot()">This Page</button>
           <button onclick="doScreenshot('snip')">Snip Region</button>
           <button onclick="doScreenshot('window')">Window</button>
           <button onclick="doScreenshot('screen')">Screen</button>
@@ -153,6 +155,25 @@
   </div>
   <div class="pane-area layout-single" id="pane-area"></div>
   <div class="messenger-pane" id="messengerPane"></div>
+  <div class="split-view" id="splitView"></div>
+  <div class="side-tray" id="sideTray">
+    <div class="tray-slit" onclick="toggleTray()"></div>
+    <div class="tray-icons">
+      <button class="tray-icon" data-panel="flags" onclick="openTrayPanel('flags')" title="Flagged">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>
+      </button>
+      <button class="tray-icon" data-panel="search" onclick="openTrayPanel('search')" title="Search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      </button>
+      <button class="tray-icon" data-panel="gallery" onclick="openTrayPanel('gallery')" title="Gallery">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+      </button>
+      <button class="tray-icon" data-panel="sessions" onclick="openTrayPanel('sessions')" title="Sessions">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+      </button>
+    </div>
+    <div class="tray-panel" id="trayPanel"></div>
+  </div>
 </div>
 
 <!-- Mobile Chat View (iOS/iPad) -->

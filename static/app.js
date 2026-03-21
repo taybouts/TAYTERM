@@ -577,13 +577,15 @@ function openSession(name, isShell, continueFlag, resumeId) {
           responseTime = elapsed + 's';
         }
         const tokens = msg.outputTokens || 0;
-        addMessengerMessage(id, msg.role, msg.text, { responseTime, tokens });
+        const contextUsed = msg.contextUsed || 0;
+        addMessengerMessage(id, msg.role, msg.text, { responseTime, tokens, contextUsed });
         if (msg.role === 'assistant') {
+          updateInfoPanel(id, msg);
           if (sessions[id]) {
             sessions[id].isThinking = false;
             sessions[id].toolHistory = [];
-            sessions[id].activeAgents = 0;
             sessions[id]._outputTokens = 0;
+            // Don't reset activeAgents here — keep showing until next user message
           }
           showMessengerTyping(id, false);
           // Set speaking glow on tab (TTS will speak it)
@@ -938,14 +940,24 @@ function setViewMode(mode) {
   });
   const paneArea = document.getElementById('pane-area');
   const messengerPane = document.getElementById('messengerPane');
+  const splitView = document.getElementById('splitView');
+  const sideTray = document.getElementById('sideTray');
+  // Hide all first
+  paneArea.style.display = 'none';
+  messengerPane.classList.remove('active');
+  splitView.classList.remove('active');
+  if (sideTray) sideTray.style.display = 'none';
+
   if (mode === 'messenger') {
-    paneArea.style.display = 'none';
     messengerPane.classList.add('active');
+    if (sideTray) sideTray.style.display = 'flex';
     renderMessenger();
+  } else if (mode === 'split') {
+    splitView.classList.add('active');
+    if (sideTray) sideTray.style.display = 'flex';
+    renderSplitView();
   } else {
     paneArea.style.display = '';
-    messengerPane.classList.remove('active');
-    // Re-fit all visible terminals after DOM is visible
     setTimeout(() => {
       for (const sid of paneSlots) {
         if (sid && sessions[sid] && sessions[sid].fitAddon) {
@@ -954,6 +966,84 @@ function setViewMode(mode) {
       }
     }, 100);
   }
+}
+
+function renderSplitView() {
+  const sv = document.getElementById('splitView');
+  sv.innerHTML = '';
+  const sid = activeSessionId || paneSlots[0];
+  if (!sid || !sessions[sid]) return;
+  const s = sessions[sid];
+
+  // Left — messenger
+  const left = document.createElement('div');
+  left.className = 'split-messenger messenger-split-pane';
+  left.dataset.sessionId = sid;
+  const chatArea = document.createElement('div');
+  chatArea.className = 'chat-messages';
+  left.appendChild(chatArea);
+
+  // Chat input
+  const inputArea = document.createElement('div');
+  inputArea.className = 'chat-input-area';
+  inputArea.innerHTML = `
+    <div class="chat-input-row">
+      <textarea class="chat-textarea" placeholder="Send a message..." rows="1"></textarea>
+      <button class="send-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>
+    </div>`;
+  left.appendChild(inputArea);
+
+  // Wire send
+  const textarea = inputArea.querySelector('.chat-textarea');
+  const sendBtn = inputArea.querySelector('.send-btn');
+  const sendMsg = () => {
+    const text = textarea.value.trim();
+    if (!text) return;
+    const ws = s.ws;
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'input', data: text }));
+      const delay = Math.max(100, Math.min(text.length * 2, 500));
+      setTimeout(() => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'input', data: '\r' })); }, delay);
+    }
+    if (sessions[sid]) { sessions[sid]._lastSendTime = Date.now(); sessions[sid].activeAgents = 0; sessions[sid].toolHistory = []; }
+    addMessengerMessage(sid, 'user', text);
+    showMessengerTyping(sid, true);
+    textarea.value = '';
+    textarea.style.height = '44px';
+  };
+  sendBtn.onclick = sendMsg;
+  textarea.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMsg(); } });
+  textarea.addEventListener('input', () => { textarea.style.height = '44px'; if (textarea.scrollHeight > 44) textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px'; });
+
+  // Load history
+  if (!messengerMessages[sid]) {
+    loadConversationHistory(sid, chatArea);
+  } else {
+    for (const m of messengerMessages[sid]) {
+      if (m.type === 'image') chatArea.appendChild(createImageBubble(m.role, m.blobUrl, m.time, null));
+      else chatArea.appendChild(createMsgBubble(m.role, m.text, m.time));
+    }
+    setTimeout(() => { chatArea.scrollTop = chatArea.scrollHeight; }, 50);
+  }
+  if (sessions[sid]?.isThinking) showMessengerTyping(sid, true, sessions[sid].toolHistory, sessions[sid].activeAgents);
+
+  sv.appendChild(left);
+
+  // Divider
+  const divider = document.createElement('div');
+  divider.className = 'split-divider';
+  sv.appendChild(divider);
+
+  // Right — terminal
+  const right = document.createElement('div');
+  right.className = 'split-terminal';
+  s.container.style.display = 'flex';
+  s.container.style.flex = '1';
+  s.container.style.minHeight = '0';
+  right.appendChild(s.container);
+  sv.appendChild(right);
+
+  setTimeout(() => { try { s.fitAddon.fit(); } catch(e) {} }, 100);
 }
 
 let selectedMessengerPane = 0;
@@ -981,39 +1071,63 @@ function createMessengerPane(sid, paneIdx, totalPanes) {
     };
   }
 
+  const chatWrap = document.createElement('div');
+  chatWrap.style.cssText = 'flex:1;position:relative;min-height:0;display:flex;flex-direction:column';
   const chatArea = document.createElement('div');
   chatArea.className = 'chat-messages';
-  pane.appendChild(chatArea);
+  chatWrap.appendChild(chatArea);
+  // Scroll-to-bottom button
+  const scrollBtn = document.createElement('button');
+  scrollBtn.className = 'chat-scroll-btn';
+  scrollBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="6 9 12 15 18 9"/></svg>';
+  scrollBtn.onclick = () => { chatArea.scrollTop = chatArea.scrollHeight; };
+  chatWrap.appendChild(scrollBtn);
+  chatArea.addEventListener('scroll', () => {
+    const atBottom = chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight < 50;
+    scrollBtn.classList.toggle('visible', !atBottom);
+  });
+  pane.appendChild(chatWrap);
 
   const inputArea = document.createElement('div');
   inputArea.className = 'chat-input-area';
   inputArea.innerHTML = `
+    <div class="stats-handle" onclick="this.closest('.chat-input-area').classList.toggle('stats-open')"></div>
     <div class="chat-input-row">
       <button class="mic-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 1a4 4 0 00-4 4v7a4 4 0 008 0V5a4 4 0 00-4-4z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/></svg></button>
       <textarea class="chat-textarea" placeholder="Send a message..." rows="1"></textarea>
       <button class="send-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>
     </div>
-    <div class="info-toggle" onclick="this.parentElement.querySelector('.info-panel').classList.toggle('open')">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="12" height="12"><polyline points="18 15 12 9 6 15"/></svg>
-    </div>
-    <div class="info-panel" data-sid="${sid || ''}">
-      <div class="info-row">
-        <span class="info-label">MODEL</span>
-        <span class="info-value" data-field="model">—</span>
+    <div class="global-stats" data-sid="${sid || ''}">
+      <div class="gs-item gs-fixed">
+        <span class="gs-label">MODEL</span>
+        <span class="gs-value" data-field="model">Opus 4.6</span>
       </div>
-      <div class="info-row">
-        <span class="info-label">CONTEXT</span>
-        <span class="info-value" data-field="context">—</span>
-        <div class="info-bar"><div class="info-bar-fill" data-field="contextBar"></div></div>
+      <div class="gs-sep"></div>
+      <div class="gs-item" style="flex:85">
+        <span class="gs-label">CONTEXT</span>
+        <span class="gs-value" data-field="context">—</span>
+        <div class="gs-bar"><div class="gs-bar-fill" data-field="contextBar"></div></div>
+        <span class="gs-pct" data-field="contextPct">—</span>
       </div>
-      <div class="info-row">
-        <span class="info-label">OUTPUT</span>
-        <span class="info-value" data-field="tokens">—</span>
+      <div class="gs-sep"></div>
+      <div class="gs-item" style="flex:15">
+        <span class="gs-label">IMAGES</span>
+        <span class="gs-value" data-field="images">0</span>
+        <div class="gs-bar"><div class="gs-bar-fill" data-field="imageBar" style="background:var(--amber)"></div></div>
       </div>
-      <div class="info-row">
-        <span class="info-label">BRANCH</span>
-        <span class="info-value" data-field="branch">—</span>
+      <div class="gs-sep"></div>
+      <div class="gs-item gs-fixed">
+        <span class="gs-label">OUTPUT</span>
+        <span class="gs-value" data-field="tokens">—</span>
       </div>
+      <div class="gs-sep"></div>
+      <div class="gs-item gs-fixed">
+        <span class="gs-label">AGENTS</span>
+        <span class="gs-value" data-field="agents">0</span>
+      </div>
+      <button class="gs-toggle" onclick="event.stopPropagation();document.body.classList.toggle('show-stats')" title="Per-message stats">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="10" height="10"><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/><circle cx="5" cy="12" r="1.5"/></svg>
+      </button>
     </div>`;
   pane.appendChild(inputArea);
 
@@ -1033,7 +1147,11 @@ function createMessengerPane(sid, paneIdx, totalPanes) {
         }
       }, delay);
     }
-    if (sessions[sid]) sessions[sid]._lastSendTime = Date.now();
+    if (sessions[sid]) {
+      sessions[sid]._lastSendTime = Date.now();
+      sessions[sid].activeAgents = 0;
+      sessions[sid].toolHistory = [];
+    }
     addMessengerMessage(sid, 'user', text);
     showMessengerTyping(sid, true);
     textarea.value = '';
@@ -1150,16 +1268,40 @@ async function loadConversationHistory(sessionId, chatArea) {
   const s = sessions[sessionId];
   if (!s) return;
   try {
+    // Load text messages from JSONL
     const resp = await fetch(`/api/conversation?name=${encodeURIComponent(s.name)}`);
     const messages = await resp.json();
+    // Load saved images from server
+    let media = [];
+    try {
+      const mediaResp = await fetch(`/api/chat-media?name=${encodeURIComponent(s.name)}`);
+      media = await mediaResp.json();
+    } catch(e) { /* ignore media errors */ }
+
     if (!messengerMessages[sessionId]) messengerMessages[sessionId] = [];
+
+    // Merge text and images by timestamp
+    const allItems = [];
     for (const m of messages) {
       if (m.role === 'user' || m.role === 'assistant') {
         const text = m.text || '';
-        // Skip image paths and [Image:...] references
         if (isImagePath(text) || /^\[Image:/.test(text)) continue;
-        messengerMessages[sessionId].push({ role: m.role, text, time: m.time || '' });
-        chatArea.appendChild(createMsgBubble(m.role, text, m.time || ''));
+        allItems.push({ type: 'text', role: m.role, text, time: m.time || '', ts: m.ts || 0 });
+      }
+    }
+    for (const img of media) {
+      allItems.push({ type: 'image', role: 'user', url: img.url, time: img.time || '', ts: img.ts || 0, size: img.size || 0 });
+    }
+
+    // Sort by timestamp so images appear in the right position
+    allItems.sort((a, b) => a.ts - b.ts);
+    for (const item of allItems) {
+      if (item.type === 'image') {
+        messengerMessages[sessionId].push({ role: 'user', type: 'image', blobUrl: item.url, time: item.time });
+        chatArea.appendChild(createImageBubble('user', item.url, item.time, null));
+      } else {
+        messengerMessages[sessionId].push({ role: item.role, text: item.text, time: item.time });
+        chatArea.appendChild(createMsgBubble(item.role, item.text, item.time));
       }
     }
     chatArea.scrollTop = chatArea.scrollHeight;
@@ -1224,19 +1366,212 @@ function createMsgBubble(role, text, time, extra) {
     bubble.textContent = text;
   }
   msg.appendChild(bubble);
-  const meta = document.createElement('div');
-  meta.className = 'msg-meta';
-  let parts = [];
-  if (time) parts.push(time);
-  if (role === 'assistant' && extra) {
-    if (extra.responseTime) parts.push('<span class="meta-stat">' + extra.responseTime + '</span>');
-    if (extra.tokens > 0) parts.push('<span class="meta-stat">' + extra.tokens + ' tok</span>');
-  }
-  if (parts.length > 0) {
-    meta.innerHTML = parts.join(' <span class="meta-sep">·</span> ');
+
+  // Time always visible
+  if (time) {
+    const meta = document.createElement('div');
+    meta.className = 'msg-meta';
+    let html = time;
+    if (role === 'assistant' && extra) {
+      if (extra.responseTime) html += ' <span class="msg-extra">&middot; ' + extra.responseTime + '</span>';
+      if (extra.tokens > 0) html += ' <span class="msg-extra">&middot; ' + extra.tokens + ' tok</span>';
+    }
+    meta.innerHTML = html;
     msg.appendChild(meta);
   }
+
+  // Right-click to flag assistant bubbles
+  if (role === 'assistant') {
+    bubble.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      const isFlagged = msg.classList.toggle('flagged');
+      // Update in-memory message
+      const sid = msg.closest('[data-session-id]')?.dataset.sessionId;
+      if (sid && messengerMessages[sid]) {
+        const match = messengerMessages[sid].find(m => m.text === text && m.role === 'assistant');
+        if (match) match.flagged = isFlagged;
+      }
+      // Save to server
+      const s = sid && sessions[sid];
+      if (s) {
+        fetch('/api/stars', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: s.name, star: { text: text.slice(0, 200), time: time || '' } })
+        }).catch(() => {});
+      }
+    });
+  }
   return msg;
+}
+
+// ══════════════════════════════════════════
+//  Side Tray
+// ══════════════════════════════════════════
+let activeTrayPanel = null;
+
+function toggleTray() {
+  const tray = document.getElementById('sideTray');
+  if (tray.classList.contains('panel-open')) {
+    tray.classList.remove('panel-open', 'open');
+    activeTrayPanel = null;
+    document.querySelectorAll('.tray-icon').forEach(b => b.classList.remove('active'));
+  } else if (tray.classList.contains('open')) {
+    tray.classList.remove('open');
+  } else {
+    tray.classList.add('open');
+  }
+}
+
+function openTrayPanel(panel) {
+  const tray = document.getElementById('sideTray');
+  const icons = document.querySelectorAll('.tray-icon');
+  if (activeTrayPanel === panel) {
+    tray.classList.remove('panel-open');
+    activeTrayPanel = null;
+    icons.forEach(b => b.classList.remove('active'));
+    return;
+  }
+  activeTrayPanel = panel;
+  icons.forEach(b => b.classList.toggle('active', b.dataset.panel === panel));
+  tray.classList.add('panel-open');
+  renderTrayPanel(panel);
+}
+
+function renderTrayPanel(panel) {
+  const body = document.getElementById('trayPanel');
+  body.innerHTML = '';
+
+  const header = document.createElement('div');
+  header.className = 'tray-panel-header';
+
+  const content = document.createElement('div');
+  content.className = 'tray-panel-body';
+
+  if (panel === 'flags') {
+    header.textContent = 'Flagged';
+    body.appendChild(header);
+    // Find all flagged messages
+    const sid = activeSessionId;
+    if (sid && messengerMessages[sid]) {
+      const flagged = messengerMessages[sid].filter(m => m.flagged);
+      if (flagged.length === 0) {
+        content.innerHTML = '<div style="text-align:center;padding:20px;font-family:var(--font-mono);font-size:11px;color:var(--text3)">Right-click any response to flag it</div>';
+      }
+      for (const m of flagged) {
+        const card = document.createElement('div');
+        card.className = 'flag-card';
+        card.innerHTML = '<div class="flag-card-text">' + (m.text || '').slice(0, 150) + '</div><div class="flag-card-time">' + (m.time || '') + '</div>';
+        card.onclick = () => scrollToMessage(sid, m);
+        content.appendChild(card);
+      }
+    }
+    // Also load from server
+    if (sid && sessions[sid]) {
+      fetch('/api/stars?name=' + encodeURIComponent(sessions[sid].name))
+        .then(r => r.json())
+        .then(stars => {
+          if (stars.length > 0 && content.children.length <= 1) {
+            content.innerHTML = '';
+            for (const s of stars) {
+              const card = document.createElement('div');
+              card.className = 'flag-card';
+              card.innerHTML = '<div class="flag-card-text">' + (s.text || '').slice(0, 150) + '</div><div class="flag-card-time">' + (s.time || '') + '</div>';
+              content.appendChild(card);
+            }
+          }
+        }).catch(() => {});
+    }
+  } else if (panel === 'search') {
+    header.textContent = 'Search';
+    body.appendChild(header);
+    const input = document.createElement('input');
+    input.className = 'tray-search';
+    input.placeholder = 'Search conversation...';
+    input.autofocus = true;
+    content.appendChild(input);
+    const results = document.createElement('div');
+    content.appendChild(results);
+    input.addEventListener('input', () => {
+      const q = input.value.trim().toLowerCase();
+      results.innerHTML = '';
+      if (!q || q.length < 2) return;
+      const sid = activeSessionId;
+      if (!sid || !messengerMessages[sid]) return;
+      let count = 0;
+      for (const m of messengerMessages[sid]) {
+        if (m.text && m.text.toLowerCase().includes(q) && count < 20) {
+          const card = document.createElement('div');
+          card.className = 'flag-card';
+          const highlighted = m.text.slice(0, 200).replace(new RegExp(q, 'gi'), '<strong style="color:var(--accent2)">$&</strong>');
+          card.innerHTML = '<div class="flag-card-text">' + highlighted + '</div><div class="flag-card-time">' + (m.role === 'user' ? 'You' : 'Claude') + ' · ' + (m.time || '') + '</div>';
+          card.onclick = () => scrollToMessage(sid, m);
+          content.appendChild(card);
+          count++;
+        }
+      }
+      if (count === 0) results.innerHTML = '<div style="padding:12px;font-family:var(--font-mono);font-size:11px;color:var(--text3);text-align:center">No results</div>';
+    });
+    setTimeout(() => input.focus(), 100);
+  } else if (panel === 'gallery') {
+    header.textContent = 'Gallery';
+    body.appendChild(header);
+    const sid = activeSessionId;
+    if (sid && messengerMessages[sid]) {
+      const images = messengerMessages[sid].filter(m => m.type === 'image');
+      for (const img of images) {
+        const thumb = document.createElement('img');
+        thumb.className = 'gallery-thumb';
+        thumb.src = img.blobUrl;
+        thumb.onclick = () => {
+          const viewer = document.createElement('div');
+          viewer.className = 'image-viewer';
+          viewer.innerHTML = '<img src="' + img.blobUrl + '">';
+          viewer.onclick = () => viewer.remove();
+          document.body.appendChild(viewer);
+        };
+        content.appendChild(thumb);
+      }
+      if (images.length === 0) {
+        content.innerHTML = '<div style="text-align:center;padding:20px;font-family:var(--font-mono);font-size:11px;color:var(--text3)">No screenshots yet</div>';
+      }
+    }
+  } else if (panel === 'sessions') {
+    header.textContent = 'Sessions';
+    body.appendChild(header);
+    if (activeSessionId && sessions[activeSessionId]) {
+      const name = sessions[activeSessionId].name;
+      fetch('/api/sessions')
+        .then(r => r.json())
+        .then(data => {
+          // Also get conversation list
+          fetch('/api/conversation?name=' + encodeURIComponent(name) + '&list=1')
+            .catch(() => {});
+          content.innerHTML = '<div style="padding:8px;font-family:var(--font-mono);font-size:10px;color:var(--text3)">Active session: ' + name + '</div>';
+        }).catch(() => {});
+    }
+  }
+
+  body.appendChild(content);
+}
+
+function scrollToMessage(sid, targetMsg) {
+  const panes = document.querySelectorAll('.messenger-split-pane');
+  for (const pane of panes) {
+    if (pane.dataset.sessionId === sid) {
+      const chatArea = pane.querySelector('.chat-messages');
+      const bubbles = chatArea.querySelectorAll('.msg');
+      for (const bubble of bubbles) {
+        const text = bubble.querySelector('.msg-bubble')?.textContent || '';
+        if (text.slice(0, 100) === (targetMsg.text || '').slice(0, 100)) {
+          bubble.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          bubble.style.outline = '1px solid var(--accent2)';
+          setTimeout(() => { bubble.style.outline = ''; }, 2000);
+          break;
+        }
+      }
+    }
+  }
 }
 
 function formatBytes(bytes) {
@@ -1306,6 +1641,8 @@ function addMessengerMessage(sessionId, role, text, extra) {
   if (!text || !text.trim()) return;
   const trimmed = text.trim();
   if (isImagePath(trimmed) || /^\[Image:/.test(trimmed)) return;
+  // Skip system notifications (task notifications, progress, etc.)
+  if (/^<task-notification|^<system-reminder|^<usage>/.test(trimmed)) return;
   if (!messengerMessages[sessionId]) messengerMessages[sessionId] = [];
   const msgs = messengerMessages[sessionId];
   for (let i = Math.max(0, msgs.length - 5); i < msgs.length; i++) {
@@ -1352,7 +1689,7 @@ const toolVerbs = {
 };
 
 function showMessengerTyping(sessionId, show, tools, agents) {
-  if (viewMode !== 'messenger') return;
+  if (viewMode !== 'messenger' && viewMode !== 'split') return;
   const panes = document.querySelectorAll('.messenger-split-pane');
   for (const pane of panes) {
     if (pane.dataset.sessionId === sessionId) {
@@ -1400,24 +1737,41 @@ function showMessengerTyping(sessionId, show, tools, agents) {
 
 function updateInfoPanel(sessionId, msg) {
   if (!msg) return;
-  const panels = document.querySelectorAll('.info-panel[data-sid="' + sessionId + '"]');
+  const panels = document.querySelectorAll('.global-stats[data-sid="' + sessionId + '"]');
   for (const panel of panels) {
     const contextUsed = msg.contextUsed || 0;
     const contextMax = 1000000;
     const pct = Math.round((contextUsed / contextMax) * 100);
     const contextK = Math.round(contextUsed / 1000);
-    const modelField = panel.querySelector('[data-field="model"]');
-    if (modelField) modelField.textContent = 'Opus 4.6 (1M)';
-    const contextField = panel.querySelector('[data-field="context"]');
-    if (contextField) contextField.textContent = contextK + 'K / 1M (' + pct + '%)';
+
+    const set = (f, v) => { const el = panel.querySelector('[data-field="' + f + '"]'); if (el) el.textContent = v; };
+    set('model', 'Opus 4.6');
+    set('context', contextK + 'K / 1M');
+    set('contextPct', pct + '%');
+
     const bar = panel.querySelector('[data-field="contextBar"]');
     if (bar) {
       bar.style.width = pct + '%';
       bar.style.background = pct > 80 ? 'var(--red)' : pct > 50 ? 'var(--amber)' : 'var(--accent2)';
     }
-    const tokensField = panel.querySelector('[data-field="tokens"]');
+
     const s = sessions[sessionId];
-    if (tokensField && s) tokensField.textContent = (s._outputTokens || 0) + ' tokens';
+    set('tokens', (s?._outputTokens || msg.outputTokens || 0) + ' tok');
+
+    // Images
+    const imgMB = (sessionImageBytes / (1024 * 1024)).toFixed(1);
+    set('images', sessionImageCount + ' · ' + imgMB + ' MB');
+    const imgBar = panel.querySelector('[data-field="imageBar"]');
+    if (imgBar) imgBar.style.width = Math.round((sessionImageBytes / SESSION_IMAGE_LIMIT) * 100) + '%';
+
+    // Agents
+    const agentWrap = panel.querySelector('[data-field="agentsWrap"]');
+    if (agentWrap && s?.activeAgents > 0) {
+      agentWrap.style.display = '';
+      set('agents', s.activeAgents + ' running');
+    } else if (agentWrap) {
+      agentWrap.style.display = 'none';
+    }
   }
 }
 
@@ -1535,6 +1889,8 @@ function renderPanes() {
   if (viewMode === 'messenger') {
     area.style.display = 'none';
     document.getElementById('messengerPane').classList.add('active');
+    const st = document.getElementById('sideTray');
+    if (st) st.style.display = 'flex';
     renderMessenger();
   }
 }
@@ -1569,6 +1925,19 @@ function toggleScreenshotMenu(e) {
   dd.classList.toggle('open');
   const close = (ev) => { if (!dd.contains(ev.target)) { dd.classList.remove('open'); document.removeEventListener('click', close); } };
   if (dd.classList.contains('open')) setTimeout(() => document.addEventListener('click', close), 0);
+}
+
+async function doPageScreenshot() {
+  document.getElementById('screenshot-dropdown').classList.remove('open');
+  try {
+    const canvas = await html2canvas(document.body, {
+      backgroundColor: '#0a0a0f',
+      scale: window.devicePixelRatio || 1,
+      logging: false,
+      useCORS: true,
+    });
+    canvas.toBlob(blob => { if (blob) uploadScreenshot(blob); }, 'image/png');
+  } catch(err) { console.error('Page screenshot failed:', err); }
 }
 
 async function doScreenshot(mode) {
@@ -1720,6 +2089,12 @@ async function uploadScreenshot(blob) {
       sessionImageCount++;
       // Show full quality image in messenger
       addMessengerImage(activeSessionId, 'user', displayUrl, result.path, compressed.size);
+      // Save image reference server-side for persistence
+      fetch('/api/chat-media', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: projectName, media: { url: displayUrl, time: new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}), size: compressed.size, ts } })
+      }).catch(() => {});
       // In messenger mode, send the image path to PTY immediately
       if (viewMode === 'messenger') {
         const s = sessions[activeSessionId];

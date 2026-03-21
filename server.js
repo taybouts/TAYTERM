@@ -164,7 +164,7 @@ class TTSTap {
             for (const sentence of parts) {
                 const s = sentence.trim();
                 if (!s || s.length <= 2) continue;
-                const key = s.slice(0, 60);
+                const key = s.slice(0, 120);
                 if (this.sentencesSent.has(key)) continue;
                 this.sentencesSent.add(key);
                 this._sendToTts(s);
@@ -212,7 +212,7 @@ class TTSTap {
             for (const sentence of parts) {
                 const s = sentence.trim();
                 if (!s || s.length <= 3) continue;
-                const key = s.slice(0, 60);
+                const key = s.slice(0, 120);
                 if (this.sentencesSent.has(key)) continue;
                 this.sentencesSent.add(key);
                 this._sendToTts(s);
@@ -313,7 +313,11 @@ function startReader(sessionKey) {
                 } else if (typeof content === 'string') {
                     text = content;
                 }
-                if (text.trim()) return { type: 'chat', role: 'user', text: text.trim() };
+                if (text.trim()) {
+                    // Skip system notifications that leak into JSONL
+                    if (/^<task-notification|^<system-reminder/.test(text.trim())) return null;
+                    return { type: 'chat', role: 'user', text: text.trim() };
+                }
             } else if (entryType === 'assistant') {
                 const content = obj.message?.content;
                 if (!Array.isArray(content)) return null;
@@ -813,7 +817,8 @@ function handleApiConversation(req, res) {
                     if (text.trim()) {
                         const ts = obj.timestamp ? new Date(obj.timestamp) : null;
                         const time = ts ? ts.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
-                        messages.push({ role: 'user', text: text.trim(), time });
+                        const rawTs = ts ? ts.getTime() : 0;
+                        messages.push({ role: 'user', text: text.trim(), time, ts: rawTs });
                     }
                 } else if (entryType === 'assistant') {
                     const msgContent = obj.message?.content || [];
@@ -835,7 +840,8 @@ function handleApiConversation(req, res) {
                     if (text.trim()) {
                         const ts = obj.timestamp ? new Date(obj.timestamp) : null;
                         const time = ts ? ts.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
-                        messages.push({ role: 'assistant', text: text.trim(), time });
+                        const rawTs = ts ? ts.getTime() : 0;
+                        messages.push({ role: 'assistant', text: text.trim(), time, ts: rawTs });
                     }
                 }
             } catch (e) { /* skip malformed lines */ }
@@ -1098,6 +1104,47 @@ async function requestHandler(req, res) {
             await handleApiNewProject(req, res);
         } else if (req.method === 'GET' && pathname === '/api/claude-logo') {
             handleClaudeLogo(req, res);
+        } else if (req.method === 'GET' && pathname === '/api/chat-media') {
+            // Get saved images/media for a project
+            const name = new URL(req.url, 'https://localhost').searchParams.get('name') || '';
+            const mediaFile = path.join(PROJECTS_DIR, name, '.tterm_media.json');
+            try {
+                const data = fs.existsSync(mediaFile) ? JSON.parse(fs.readFileSync(mediaFile, 'utf-8')) : [];
+                sendJson(res, data);
+            } catch(e) { sendJson(res, []); }
+        } else if (req.method === 'POST' && pathname === '/api/chat-media') {
+            // Save an image/media reference
+            const body = await readBody(req);
+            const { name, media } = JSON.parse(body.toString('utf-8'));
+            const mediaFile = path.join(PROJECTS_DIR, name, '.tterm_media.json');
+            try {
+                const existing = fs.existsSync(mediaFile) ? JSON.parse(fs.readFileSync(mediaFile, 'utf-8')) : [];
+                existing.push(media);
+                fs.writeFileSync(mediaFile, JSON.stringify(existing, null, 2));
+                sendJson(res, { ok: true });
+            } catch(e) { sendJson(res, { error: e.message }, 500); }
+        } else if (req.method === 'GET' && pathname === '/api/stars') {
+            // Get starred messages for a project
+            const name = new URL(req.url, 'https://localhost').searchParams.get('name') || '';
+            const starsFile = path.join(PROJECTS_DIR, name, '.tterm_stars.json');
+            try {
+                const data = fs.existsSync(starsFile) ? JSON.parse(fs.readFileSync(starsFile, 'utf-8')) : [];
+                sendJson(res, data);
+            } catch(e) { sendJson(res, []); }
+        } else if (req.method === 'POST' && pathname === '/api/stars') {
+            // Star/unstar a message
+            const body = await readBody(req);
+            const { name, star } = JSON.parse(body.toString('utf-8'));
+            const starsFile = path.join(PROJECTS_DIR, name, '.tterm_stars.json');
+            try {
+                const existing = fs.existsSync(starsFile) ? JSON.parse(fs.readFileSync(starsFile, 'utf-8')) : [];
+                // Toggle — remove if exists, add if not
+                const idx = existing.findIndex(s => s.text === star.text && s.time === star.time);
+                if (idx >= 0) existing.splice(idx, 1);
+                else existing.push(star);
+                fs.writeFileSync(starsFile, JSON.stringify(existing, null, 2));
+                sendJson(res, { ok: true, starred: idx < 0 });
+            } catch(e) { sendJson(res, { error: e.message }, 500); }
         } else if (req.method === 'GET' && pathname === '/api/favorites') {
             try {
                 const favs = fs.existsSync(FAVORITES_FILE) ? JSON.parse(fs.readFileSync(FAVORITES_FILE, 'utf-8')) : [];
