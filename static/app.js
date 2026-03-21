@@ -26,12 +26,12 @@ function saveState() {
   const active = activeSessionId ? sessions[activeSessionId]?.name : null;
   // Save pane assignments by name (IDs change across sessions)
   const panes = paneSlots.map(id => id && sessions[id] ? sessions[id].name : null);
-  localStorage.setItem('tayterm_tabs', JSON.stringify({ tabs, active, layout, panes }));
+  localStorage.setItem('tterm_tabs', JSON.stringify({ tabs, active, layout, panes }));
 }
 
 function loadState() {
   try {
-    return JSON.parse(localStorage.getItem('tayterm_tabs'));
+    return JSON.parse(localStorage.getItem('tterm_tabs'));
   } catch(e) { return null; }
 }
 

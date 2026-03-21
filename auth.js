@@ -26,10 +26,10 @@ try {
 //  Config
 // ---------------------------------------------------------------------------
 
-const PASSKEY_FILE = path.join(path.dirname(path.resolve(__filename)), '.tayterm_passkeys.json');
+const PASSKEY_FILE = path.join(path.dirname(path.resolve(__filename)), '.tterm_passkeys.json');
 const SESSION_MAX_AGE = 86400; // 24 hours in seconds
 const TOKEN_MAX_AGE = 5 * 60 * 1000; // 5 minutes
-const COOKIE_NAME = 'tayterm_session';
+const COOKIE_NAME = 'tterm_session';
 
 // Pending QR sessions: token -> { approved, created, sessionId }
 const pendingSessions = new Map();

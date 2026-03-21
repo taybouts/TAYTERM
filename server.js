@@ -202,16 +202,16 @@ class TTSTap {
     }
 
     feedClean(text) {
-        // Process already-clean text from headless terminal
-        // No _shouldSkip — headless state machine already filtered noise
+        // Process clean text from JSONL
         const lines = text.split('\n');
         for (const line of lines) {
             const cleaned = this._cleanMarkdown(line);
             if (!cleaned || cleaned.length <= 3) continue;
-            const parts = cleaned.split(/(?<=[.!?:])(?:\s+|\n)/);
+            // Split on sentence endings (. ! ?) but NOT on colons — they fragment lists
+            const parts = cleaned.split(/(?<=[.!?])(?:\s+|\n)/);
             for (const sentence of parts) {
                 const s = sentence.trim();
-                if (!s || s.length <= 2) continue;
+                if (!s || s.length <= 3) continue;
                 const key = s.slice(0, 60);
                 if (this.sentencesSent.has(key)) continue;
                 this.sentencesSent.add(key);
