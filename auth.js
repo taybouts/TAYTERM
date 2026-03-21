@@ -112,14 +112,77 @@ function getRpConfig(req) {
 //  Session Management
 // ---------------------------------------------------------------------------
 
+function parseDeviceInfo(ua) {
+    if (!ua) return { browser: 'Unknown', os: 'Unknown', device: '' };
+    // Browser
+    let browser = 'Unknown';
+    if (/Edg\//.test(ua)) browser = 'Edge';
+    else if (/Chrome\//.test(ua)) browser = 'Chrome';
+    else if (/Firefox\//.test(ua)) browser = 'Firefox';
+    else if (/Safari\//.test(ua)) browser = 'Safari';
+    else if (/Opera|OPR/.test(ua)) browser = 'Opera';
+    // Browser version
+    const verMatch = ua.match(/(Edg|Chrome|Firefox|Safari|OPR)\/(\d+)/);
+    if (verMatch) browser += ' ' + verMatch[2];
+    // OS
+    let os = 'Unknown';
+    if (/Windows NT 10/.test(ua)) os = 'Windows 10/11';
+    else if (/Windows/.test(ua)) os = 'Windows';
+    else if (/Mac OS X/.test(ua)) { const m = ua.match(/Mac OS X (\d+[._]\d+)/); os = 'macOS' + (m ? ' ' + m[1].replace(/_/g,'.') : ''); }
+    else if (/Android/.test(ua)) { const m = ua.match(/Android (\d+)/); os = 'Android' + (m ? ' ' + m[1] : ''); }
+    else if (/iPhone/.test(ua)) { const m = ua.match(/iPhone OS (\d+_\d+)/); os = 'iOS' + (m ? ' ' + m[1].replace(/_/g,'.') : ''); }
+    else if (/iPad/.test(ua)) { const m = ua.match(/CPU OS (\d+_\d+)/); os = 'iPadOS' + (m ? ' ' + m[1].replace(/_/g,'.') : ''); }
+    else if (/Linux/.test(ua)) os = 'Linux';
+    // Device
+    let device = '';
+    if (/iPhone/.test(ua)) device = 'iPhone';
+    else if (/iPad/.test(ua)) device = 'iPad';
+    else if (/Android/.test(ua)) { const m = ua.match(/;\s*([^;)]+)\s*Build/); device = m ? m[1].trim() : 'Android Device'; }
+    return { browser, os, device };
+}
+
+// Map known IPs to machine names
+const knownMachines = {
+    '100.64.0.2': 'TayCast',
+    '100.64.0.1': 'Broadcast-1',
+    '100.64.0.4': 'OneO7',
+    '100.64.0.41': 'PodM-1',
+    '100.64.0.42': 'PodM-2',
+    '::1': 'Localhost',
+    '127.0.0.1': 'Localhost',
+    '::ffff:127.0.0.1': 'Localhost',
+};
+
+function resolveMachineName(ip) {
+    if (!ip) return '';
+    // Check direct match
+    if (knownMachines[ip]) return knownMachines[ip];
+    // Check forwarded IPs (may have multiple comma-separated)
+    const first = ip.split(',')[0].trim();
+    if (knownMachines[first]) return knownMachines[first];
+    // Check if it's a local IP
+    if (first.startsWith('192.168.')) return 'Local Network';
+    return '';
+}
+
 function createSession(req) {
     const sessionId = crypto.randomBytes(32).toString('hex');
     const now = Date.now();
+    const ua = req ? (req.headers['user-agent'] || '') : '';
+    const info = parseDeviceInfo(ua);
+    const ip = req ? (req.headers['cf-connecting-ip'] || req.socket.remoteAddress || '').split(',')[0].trim() : '';
+    const machineName = resolveMachineName(ip);
     activeSessions.set(sessionId, {
         created: now,
         expires: now + SESSION_MAX_AGE * 1000,
-        ip: req ? (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '') : '',
-        userAgent: req ? (req.headers['user-agent'] || '') : '',
+        ip,
+        userAgent: ua,
+        browser: info.browser,
+        os: info.os,
+        device: info.device,
+        machine: machineName,
+        host: req ? (req.headers.host || '') : '',
+        via: req ? (req.headers['cf-connecting-ip'] ? 'Cloudflare' : req.headers.host?.includes('tse.mesh') ? 'Tailscale' : 'Direct') : '',
     });
     return sessionId;
 }
@@ -252,14 +315,22 @@ async function handleAuthRoute(req, res, pathname) {
         const currentSessionId = getSessionFromCookie(req);
         const list = [];
         for (const [sid, data] of activeSessions) {
-            const ua = data.userAgent || '';
-            const browser = ua.match(/Chrome|Firefox|Safari|Edge|Opera/)?.[0] || 'Unknown';
-            const os = ua.match(/Windows|Mac|Linux|Android|iPhone|iPad/)?.[0] || 'Unknown';
             list.push({
                 id: sid.slice(0, 8),
                 fullId: sid,
                 ip: data.ip,
-                browser, os,
+                browser: data.browser || 'Unknown',
+                os: data.os || 'Unknown',
+                device: data.device || '',
+                machine: data.machine || resolveMachineName(data.ip),
+                via: data.via || 'Direct',
+                host: data.host || '',
+                screen: data.screen || '',
+                cores: data.cores || 0,
+                memory: data.memory || 0,
+                gpu: data.gpu || '',
+                platform: data.platform || '',
+                timezone: data.timezone || '',
                 created: data.created,
                 expires: data.expires,
                 isCurrent: sid === currentSessionId,
@@ -519,6 +590,33 @@ function handleCheck(req, res, url) {
     }
 
     if (pending.approved && pending.sessionId) {
+        // Update session with DESKTOP info (not phone that approved)
+        const ua = req.headers['user-agent'] || '';
+        const info = parseDeviceInfo(ua);
+        const ip = (req.headers['cf-connecting-ip'] || req.socket.remoteAddress || '').split(',')[0].trim();
+        // Parse client-side device fingerprint
+        let clientInfo = {};
+        try { clientInfo = JSON.parse(url.searchParams.get('info') || '{}'); } catch(e) {}
+        const session = activeSessions.get(pending.sessionId);
+        if (session) {
+            session.ip = ip;
+            session.userAgent = ua;
+            session.browser = info.browser;
+            session.os = info.os;
+            session.device = info.device;
+            session.machine = resolveMachineName(ip);
+            session.host = req.headers.host || '';
+            session.via = req.headers['cf-connecting-ip'] ? 'Cloudflare' : req.headers.host?.includes('tse.mesh') ? 'Tailscale' : 'Direct';
+            // Client-side fingerprint
+            session.screen = clientInfo.screen || '';
+            session.cores = clientInfo.cores || 0;
+            session.memory = clientInfo.memory || 0;
+            session.gpu = clientInfo.gpu || '';
+            session.platform = clientInfo.platform || '';
+            session.timezone = clientInfo.timezone || '';
+            session.language = clientInfo.language || '';
+            session.touch = clientInfo.touch || false;
+        }
         // Set session cookie on the desktop browser that's polling
         setSessionCookie(res, pending.sessionId, req);
         sendJson(res, { approved: true });
@@ -549,7 +647,7 @@ async function handleRegisterStart(req, res) {
 
     const rpConfig = getRpConfig(req);
     const { rpID, rpName } = rpConfig;
-    console.log(`[AUTH REGISTER] Using rpID=${rpID} rpName=${rpName} host=${req.headers.host} x-forwarded-host=${req.headers['x-forwarded-host']} cf-connecting-ip=${req.headers['cf-connecting-ip']}`);
+    console.log(`[AUTH REGISTER] rpID=${rpID} origin=${rpConfig.origin}`);
     const data = loadPasskeys();
     const existingCreds = (data.passkeys || []).map(pk => ({
         id: pk.credentialID,
@@ -561,12 +659,11 @@ async function handleRegisterStart(req, res) {
         const options = await simplewebauthn.generateRegistrationOptions({
             rpName,
             rpID,
-            userName: 'tayterm-admin',
-            userDisplayName: 'TayTerm Admin',
+            userName: 'tterm-admin',
+            userDisplayName: 'T-Term Admin',
             attestationType: 'none',
             excludeCredentials: existingCreds,
             authenticatorSelection: {
-                authenticatorAttachment: 'platform',
                 residentKey: 'required',
                 userVerification: 'required',
             },
@@ -698,7 +795,7 @@ function loginPageHTML(token, qrDataUrl) {
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>T-TERM — Sign In</title>
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
 <style>
@@ -841,10 +938,34 @@ body::after {
 const TOKEN = '${token}';
 let polling = true;
 
+// Collect device fingerprint automatically
+function getDeviceInfo() {
+    const canvas = document.createElement('canvas');
+    const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+    let gpu = '';
+    if (gl) {
+        const ext = gl.getExtension('WEBGL_debug_renderer_info');
+        if (ext) gpu = gl.getParameter(ext.UNMASKED_RENDERER_WEBGL);
+    }
+    return {
+        screen: screen.width + 'x' + screen.height,
+        pixelRatio: window.devicePixelRatio || 1,
+        cores: navigator.hardwareConcurrency || 0,
+        memory: navigator.deviceMemory || 0,
+        gpu: gpu,
+        platform: navigator.platform || '',
+        language: navigator.language || '',
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || '',
+        touch: navigator.maxTouchPoints > 0,
+        darkMode: window.matchMedia('(prefers-color-scheme: dark)').matches,
+    };
+}
+const deviceInfo = getDeviceInfo();
+
 const poll = setInterval(async () => {
     if (!polling) return;
     try {
-        const resp = await fetch('/check?token=' + TOKEN);
+        const resp = await fetch('/check?token=' + TOKEN + '&info=' + encodeURIComponent(JSON.stringify(deviceInfo)));
         const data = await resp.json();
         if (data.approved) {
             clearInterval(poll);
@@ -920,7 +1041,7 @@ function sessionsPageHTML() {
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>T-TERM — Sessions</title>
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
 <style>
@@ -984,6 +1105,8 @@ body::before {
     padding: 2px 8px; border-radius: 4px; letter-spacing: 0.5px;
 }
 .tag-current { background: rgba(56,189,248,0.1); color: #38bdf8; border: 1px solid rgba(56,189,248,0.2); }
+.tag-cloudflare { background: rgba(245,158,11,0.1); color: #f59e0b; border: 1px solid rgba(245,158,11,0.2); }
+.tag-tailscale { background: rgba(34,197,94,0.1); color: #22c55e; border: 1px solid rgba(34,197,94,0.2); }
 .kill-btn {
     font-family: 'Share Tech Mono', monospace; font-size: 9px;
     padding: 4px 12px; border-radius: 4px; letter-spacing: 1px;
@@ -1029,13 +1152,19 @@ async function load() {
     }
     el.innerHTML = sessions.map((s, i) => {
         const created = new Date(s.created).toLocaleString();
-        const expires = new Date(s.expires).toLocaleString();
         const remaining = Math.max(0, Math.round((s.expires - Date.now()) / 60000));
+        const hours = Math.floor(remaining / 60);
+        const mins = remaining % 60;
+        const timeLeft = hours > 0 ? hours + 'h ' + mins + 'm' : mins + 'm';
+        const deviceLabel = s.device ? s.device + ' · ' : '';
+        const machineLabel = s.machine ? '<strong style="color:var(--accent2)">' + s.machine + '</strong> · ' : '';
+        const viaTag = s.via !== 'Direct' ? ' <span class="session-tag tag-' + s.via.toLowerCase() + '">' + s.via.toUpperCase() + '</span>' : '';
         return '<div class="session-card' + (s.isCurrent ? ' current' : '') + '" style="animation-delay:' + (i * 0.05) + 's">' +
             '<div class="session-dot"></div>' +
             '<div class="session-info">' +
-                '<div class="session-label">' + s.browser + ' on ' + s.os + (s.isCurrent ? ' <span class="session-tag tag-current">THIS DEVICE</span>' : '') + '</div>' +
-                '<div class="session-meta"><span>IP: ' + s.ip + '</span><span>ID: ' + s.id + '</span><span>' + remaining + 'min left</span></div>' +
+                '<div class="session-label">' + machineLabel + deviceLabel + s.browser + ' on ' + s.os + (s.isCurrent ? ' <span class="session-tag tag-current">THIS DEVICE</span>' : '') + viaTag + '</div>' +
+                '<div class="session-meta"><span>' + s.ip + '</span><span>' + s.id + '</span><span>' + timeLeft + ' left</span><span>' + created + '</span></div>' +
+                (s.screen || s.gpu ? '<div class="session-meta"><span>' + (s.screen ? s.screen : '') + '</span>' + (s.cores ? '<span>' + s.cores + ' cores</span>' : '') + (s.memory ? '<span>' + s.memory + 'GB RAM</span>' : '') + (s.gpu ? '<span>' + s.gpu.substring(0,40) + '</span>' : '') + (s.timezone ? '<span>' + s.timezone + '</span>' : '') + '</div>' : '') +
             '</div>' +
             (s.isCurrent ? '' : '<button class="kill-btn" onclick="killSession(\\'' + s.fullId + '\\', this)">Revoke</button>') +
         '</div>';
@@ -1068,7 +1197,7 @@ function approvePageHTML(token) {
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>T-TERM — Approve</title>
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
 <style>
@@ -1225,101 +1354,167 @@ const REGISTER_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>T-TERM — Register Device</title>
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
 <style>
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 body {
-    min-height: 100vh;
+    min-height: 100vh; max-width: 100vw;
     background: linear-gradient(135deg, #0a0a0f 0%, #0d1117 30%, #0a0f1a 60%, #0a0a0f 100%);
-    font-family: 'Segoe UI', Arial, sans-serif;
-    color: #e6edf3;
+    font-family: 'Segoe UI', Arial, sans-serif; color: #e6edf3;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
     position: relative; overflow: hidden;
 }
+html { overflow: hidden; max-width: 100vw; }
 body::before {
-    content: ''; position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-    background-image:
-        linear-gradient(rgba(56, 189, 248, 0.03) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(56, 189, 248, 0.03) 1px, transparent 1px);
-    background-size: 60px 60px; z-index: 0;
+    content: ''; position: fixed; inset: 0;
+    background-image: linear-gradient(rgba(56,189,248,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(56,189,248,0.03) 1px, transparent 1px);
+    background-size: 60px 60px; z-index: 0; pointer-events: none;
 }
+body::after {
+    content: ''; position: fixed; width: 100%; height: 2px; left: 0;
+    background: linear-gradient(90deg, transparent, rgba(56,189,248,0.06), transparent);
+    animation: scan 8s linear infinite; z-index: 0; pointer-events: none;
+}
+@keyframes scan { from { top: -2px; } to { top: 100%; } }
+.orb { position: absolute; border-radius: 50%; filter: blur(100px); opacity: 0.08; z-index: 0; }
+.orb1 { width: 400px; height: 400px; background: #0284c7; top: -150px; left: -150px; }
+.orb2 { width: 300px; height: 300px; background: #38bdf8; bottom: -100px; right: -100px; }
+.hud { position: fixed; width: 28px; height: 28px; z-index: 2; pointer-events: none; opacity: 0.15; }
+.hud::before, .hud::after { content: ''; position: absolute; background: #38bdf8; }
+.hud-tl { top: 10px; left: 10px; } .hud-tl::before { width: 18px; height: 1px; } .hud-tl::after { width: 1px; height: 18px; }
+.hud-tr { top: 10px; right: 10px; } .hud-tr::before { width: 18px; height: 1px; right: 0; } .hud-tr::after { width: 1px; height: 18px; right: 0; }
+.hud-bl { bottom: 10px; left: 10px; } .hud-bl::before { width: 18px; height: 1px; bottom: 0; } .hud-bl::after { width: 1px; height: 18px; bottom: 0; }
+.hud-br { bottom: 10px; right: 10px; } .hud-br::before { width: 18px; height: 1px; right: 0; bottom: 0; } .hud-br::after { width: 1px; height: 18px; right: 0; bottom: 0; }
 .container {
     position: relative; z-index: 1; text-align: center;
-    background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 24px; padding: 48px 40px; backdrop-filter: blur(20px);
-    max-width: 440px; width: 90%;
+    background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 24px; padding: 48px 44px; backdrop-filter: blur(20px);
+    max-width: 420px; width: 90%;
+    animation: containerIn 0.8s ease;
 }
+@keyframes containerIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
 .logo {
-    font-size: 32px; font-weight: 700; letter-spacing: 4px;
-    background: linear-gradient(135deg, #38bdf8 0%, #818cf8 50%, #c084fc 100%);
+    font-family: 'Rajdhani', sans-serif; font-size: 48px; font-weight: 700;
+    letter-spacing: 12px; text-transform: uppercase;
+    background: linear-gradient(135deg, #38bdf8 0%, #0284c7 100%);
     -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-    margin-bottom: 8px;
+    background-clip: text; margin-bottom: 4px;
 }
-.subtitle { font-size: 12px; letter-spacing: 3px; color: #475569; margin-bottom: 36px; text-transform: uppercase; }
+.subtitle {
+    font-family: 'Share Tech Mono', monospace; font-size: 11px;
+    letter-spacing: 6px; color: #475569; margin-bottom: 36px; text-transform: uppercase;
+}
+.icon-shield {
+    width: 56px; height: 56px; margin: 0 auto 20px;
+    border: 2px solid rgba(56,189,248,0.3); border-radius: 14px;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(56,189,248,0.06);
+    animation: fadeIn 0.6s ease 0.3s both;
+}
+.icon-shield svg { width: 28px; height: 28px; color: #38bdf8; }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 .description {
-    font-size: 14px; color: #94a3b8; line-height: 1.6; margin-bottom: 28px;
+    font-size: 13px; color: #64748b; line-height: 1.6; margin-bottom: 24px;
+    animation: fadeIn 0.6s ease 0.4s both;
 }
+.form-group { margin-bottom: 16px; text-align: left; animation: fadeIn 0.6s ease 0.5s both; }
+.form-label {
+    font-family: 'Share Tech Mono', monospace; font-size: 9px;
+    letter-spacing: 2px; color: #475569; text-transform: uppercase;
+    margin-bottom: 6px; display: block;
+}
+.form-input {
+    width: 100%; padding: 12px 14px; background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08); border-radius: 10px;
+    font-family: 'Segoe UI', sans-serif; font-size: 15px; color: #e6edf3;
+    outline: none; transition: border-color 0.2s;
+}
+.form-input:focus { border-color: rgba(56,189,248,0.4); }
+.form-input::placeholder { color: #475569; }
 .btn {
-    display: inline-block; width: 100%; padding: 16px 32px; border-radius: 12px; border: none;
-    background: linear-gradient(135deg, #38bdf8, #818cf8);
-    color: white; font-size: 16px; font-weight: 600; cursor: pointer;
-    letter-spacing: 1px; transition: all 0.3s;
+    display: block; width: 100%; padding: 14px; border-radius: 10px; border: none;
+    background: linear-gradient(135deg, #0284c7, #38bdf8);
+    color: white; font-family: 'Rajdhani', sans-serif; font-size: 16px;
+    font-weight: 700; cursor: pointer; letter-spacing: 2px; text-transform: uppercase;
+    transition: all 0.3s; animation: fadeIn 0.6s ease 0.6s both;
 }
+.btn:hover { box-shadow: 0 4px 20px rgba(2,132,199,0.3); }
 .btn:active { transform: scale(0.97); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn.done {
-    background: linear-gradient(135deg, #059669, #34d399);
-}
-.error { color: #f87171; margin-top: 16px; font-size: 13px; display: none; }
-.status { color: #94a3b8; margin-top: 12px; font-size: 13px; }
+.btn.done { background: linear-gradient(135deg, #059669, #22c55e); }
+.error { color: #ef4444; margin-top: 16px; font-family: 'Share Tech Mono', monospace; font-size: 11px; display: none; }
+.status { color: #475569; margin-top: 12px; font-family: 'Share Tech Mono', monospace; font-size: 11px; letter-spacing: 1px; }
 .backup-codes {
     display: none; margin-top: 24px; text-align: left;
-    background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);
+    background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06);
     border-radius: 12px; padding: 20px;
 }
 .backup-codes h3 {
-    font-size: 14px; color: #fbbf24; margin-bottom: 8px; letter-spacing: 1px;
+    font-family: 'Share Tech Mono', monospace; font-size: 10px;
+    color: #f59e0b; margin-bottom: 8px; letter-spacing: 2px; text-transform: uppercase;
 }
-.backup-codes p { color: #94a3b8; font-size: 12px; margin-bottom: 12px; line-height: 1.5; }
+.backup-codes p { color: #64748b; font-size: 12px; margin-bottom: 12px; line-height: 1.5; }
 .code-grid {
     display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
-    font-family: 'Consolas', monospace; font-size: 15px;
-    letter-spacing: 2px; color: #34d399;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    letter-spacing: 3px; color: #22c55e;
 }
 .code-grid span {
-    background: rgba(0,0,0,0.3); padding: 6px 8px; border-radius: 6px; text-align: center;
+    background: rgba(0,0,0,0.3); padding: 8px; border-radius: 6px; text-align: center;
+    border: 1px solid rgba(34,197,94,0.15);
 }
 .btn-continue {
-    display: inline-block; width: 100%; padding: 14px 32px; border-radius: 12px; border: none;
-    background: linear-gradient(135deg, #059669, #34d399);
-    color: white; font-size: 16px; font-weight: 600; cursor: pointer;
-    letter-spacing: 1px; transition: all 0.3s; margin-top: 16px;
+    display: block; width: 100%; padding: 14px; border-radius: 10px; border: none;
+    background: linear-gradient(135deg, #059669, #22c55e);
+    color: white; font-family: 'Rajdhani', sans-serif; font-size: 16px;
+    font-weight: 700; cursor: pointer; letter-spacing: 2px; text-transform: uppercase;
+    transition: all 0.3s; margin-top: 16px;
 }
+.btn-continue:hover { box-shadow: 0 4px 20px rgba(34,197,94,0.3); }
 .btn-continue:active { transform: scale(0.97); }
-.orb { position: absolute; border-radius: 50%; filter: blur(80px); opacity: 0.12; z-index: 0; }
-.orb1 { width: 300px; height: 300px; background: #38bdf8; top: -100px; left: -100px; }
-.orb2 { width: 200px; height: 200px; background: #c084fc; bottom: -50px; right: -50px; }
+.success-icon {
+    width: 64px; height: 64px; margin: 0 auto 16px;
+    border: 2px solid rgba(34,197,94,0.4); border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(34,197,94,0.08);
+    animation: pop 0.4s ease;
+}
+@keyframes pop { from { transform: scale(0); } to { transform: scale(1); } }
+.success-icon svg { width: 32px; height: 32px; color: #22c55e; }
 </style>
 </head>
 <body>
+<div class="hud hud-tl"></div><div class="hud hud-tr"></div>
+<div class="hud hud-bl"></div><div class="hud hud-br"></div>
 <div class="orb orb1"></div>
 <div class="orb orb2"></div>
 <div class="container">
-    <div class="logo" style="font-family:'Rajdhani',sans-serif;font-size:32px;font-weight:700;letter-spacing:8px;text-transform:uppercase">T-TERM</div>
-    <div class="subtitle" style="font-family:'Share Tech Mono',monospace;font-size:10px;letter-spacing:4px">First-time Setup</div>
+    <div class="logo">T-TERM</div>
+    <div class="subtitle">First-time Setup</div>
 
     <div id="register-section">
+        <div class="icon-shield">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            </svg>
+        </div>
         <div class="description">
             Register a passkey to secure your terminal. This uses your device's
             built-in biometrics (Face ID, fingerprint, or PIN).
         </div>
-        <button class="btn" id="btn-register" onclick="registerDevice()">Register your device</button>
+        <button class="btn" id="btn-register" onclick="registerDevice()">Register Device</button>
     </div>
 
     <div class="backup-codes" id="backup-codes">
-        <h3>BACKUP CODES</h3>
+        <div class="success-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="20 6 9 17 4 12"/>
+            </svg>
+        </div>
+        <h3>Backup Codes</h3>
         <p>Save these codes somewhere safe. Each can be used once if you lose your device.</p>
         <div class="code-grid" id="code-grid"></div>
         <button class="btn-continue" onclick="window.location='/'">Continue to T-TERM</button>
@@ -1373,6 +1568,8 @@ async function registerDevice() {
         btn.disabled = false;
     }
 }
+
+// Enter key triggers registration
 
 function showError(msg) {
     const el = document.getElementById('error');

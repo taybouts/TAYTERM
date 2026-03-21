@@ -281,7 +281,7 @@ function startReader(sessionKey) {
                         const obj = JSON.parse(line);
                         const msg = parseJsonlEntry(obj);
                         if (msg) {
-                            // Broadcast to WebSocket subscribers
+                            entry.isThinking = isThinking;
                             for (const ws of entry.subscribers) {
                                 try {
                                     if (ws.readyState === WebSocket.OPEN) {
@@ -289,7 +289,6 @@ function startReader(sessionKey) {
                                     }
                                 } catch (e) { /* ignore */ }
                             }
-                            // Feed assistant text to TTS (clean, structured data from JSONL)
                             if (msg.type === 'chat' && msg.role === 'assistant' && ttsTap) {
                                 try { ttsTap.feedClean(msg.text); } catch (e) { /* ignore */ }
                             }
@@ -299,9 +298,12 @@ function startReader(sessionKey) {
             } catch (e) { /* ignore read errors */ }
         }
 
+        let isThinking = false;
+
         function parseJsonlEntry(obj) {
             const entryType = obj.type;
             if (entryType === 'user') {
+                isThinking = true; // User sent message — Claude will start thinking
                 const content = obj.message?.content;
                 let text = '';
                 if (Array.isArray(content)) {
@@ -317,12 +319,37 @@ function startReader(sessionKey) {
                 if (!Array.isArray(content)) return null;
                 let text = '';
                 const tools = [];
+                let hasThinking = false;
+                let agentCount = 0;
                 for (const c of content) {
                     if (c.type === 'text') text += c.text;
-                    else if (c.type === 'tool_use') tools.push(c.name);
+                    else if (c.type === 'tool_use') {
+                        tools.push(c.name);
+                        if (c.name === 'Agent') agentCount++;
+                    }
+                    else if (c.type === 'thinking') hasThinking = true;
                 }
-                if (text.trim()) return { type: 'chat', role: 'assistant', text: text.trim() };
-                if (tools.length > 0) return { type: 'tool', tools };
+                // Extract token/context info
+                const usage = obj.message?.usage || {};
+                const outputTokens = usage.output_tokens || 0;
+                const contextUsed = usage.cache_read_input_tokens || 0;
+                const tokenInfo = { outputTokens, contextUsed };
+
+                if (hasThinking && !text.trim() && tools.length === 0) {
+                    isThinking = true;
+                    return { type: 'thinking', ...tokenInfo };
+                }
+                if (text.trim()) {
+                    isThinking = false;
+                    if (tools.length > 0) {
+                        return { type: 'chat', role: 'assistant', text: text.trim(), tools, agents: agentCount, ...tokenInfo };
+                    }
+                    return { type: 'chat', role: 'assistant', text: text.trim(), ...tokenInfo };
+                }
+                if (tools.length > 0) {
+                    isThinking = true;
+                    return { type: 'tool', tools, agents: agentCount, ...tokenInfo };
+                }
             }
             return null;
         }

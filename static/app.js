@@ -570,9 +570,54 @@ function openSession(name, isShell, continueFlag, resumeId) {
         term.write(msg.data);
         dismissLoader();
       } else if (msg.type === 'chat') {
-        addMessengerMessage(id, msg.role, msg.text);
+        // Calculate response time from when user last sent
+        let responseTime = '';
+        if (msg.role === 'assistant' && sessions[id] && sessions[id]._lastSendTime) {
+          const elapsed = ((Date.now() - sessions[id]._lastSendTime) / 1000).toFixed(1);
+          responseTime = elapsed + 's';
+        }
+        const tokens = msg.outputTokens || 0;
+        addMessengerMessage(id, msg.role, msg.text, { responseTime, tokens });
+        if (msg.role === 'assistant') {
+          if (sessions[id]) {
+            sessions[id].isThinking = false;
+            sessions[id].toolHistory = [];
+            sessions[id].activeAgents = 0;
+            sessions[id]._outputTokens = 0;
+          }
+          showMessengerTyping(id, false);
+          // Set speaking glow on tab (TTS will speak it)
+          if (sessions[id] && !sessions[id].muted) {
+            sessions[id].speaking = true;
+            renderTabs();
+            const words = (msg.text || '').split(/\s+/).length;
+            const duration = Math.max(3000, Math.min(words * 100, 30000));
+            clearTimeout(sessions[id]._speakTimer);
+            sessions[id]._speakTimer = setTimeout(() => {
+              if (sessions[id]) { sessions[id].speaking = false; renderTabs(); }
+            }, duration);
+          }
+        }
+      } else if (msg.type === 'thinking') {
+        if (sessions[id]) {
+          sessions[id].isThinking = true;
+          if (!sessions[id].toolHistory) sessions[id].toolHistory = [];
+          sessions[id]._outputTokens = (sessions[id]._outputTokens || 0) + (msg.outputTokens || 0);
+        }
+        showMessengerTyping(id, true, sessions[id]?.toolHistory, sessions[id]?.activeAgents);
+        updateInfoPanel(id, msg);
       } else if (msg.type === 'tool') {
-        showMessengerTyping(id, true);
+        if (sessions[id]) {
+          sessions[id].isThinking = true;
+          if (!sessions[id].toolHistory) sessions[id].toolHistory = [];
+          sessions[id]._outputTokens = (sessions[id]._outputTokens || 0) + (msg.outputTokens || 0);
+          for (const t of (msg.tools || [])) {
+            sessions[id].toolHistory.push(t);
+            if (t === 'Agent') sessions[id].activeAgents = (sessions[id].activeAgents || 0) + 1;
+          }
+        }
+        showMessengerTyping(id, true, sessions[id]?.toolHistory, sessions[id]?.activeAgents);
+        updateInfoPanel(id, msg);
       }
     } catch(err) {}
   };
@@ -754,7 +799,7 @@ function renderTabs() {
       '<button class="tab-close" onclick="event.stopPropagation(); closeSession(\'' + id + '\')">' + closeIcon + '</button>';
     tab.onclick = () => switchTab(id);
     if (!s.isShell) {
-      tab.oncontextmenu = (e) => { e.preventDefault(); showVoicePicker(id, e); };
+      tab.oncontextmenu = (e) => { e.preventDefault(); showTabMenu(id, e); };
     }
     strip.appendChild(tab);
   }
@@ -765,16 +810,47 @@ function renderTabs() {
   strip.appendChild(addBtn);
 }
 
-function showVoicePicker(sessionId, event) {
-  closeVoicePicker();
+function showTabMenu(sessionId, event) {
+  closeTabMenu();
   const s = sessions[sessionId];
   if (!s) return;
+
+  const tab = event.currentTarget;
+  const rect = tab.getBoundingClientRect();
   const dd = document.createElement('div');
-  dd.id = 'voice-picker';
-  dd.style.left = event.clientX + 'px';
-  dd.style.top = event.clientY + 'px';
+  dd.className = 'tab-menu';
+  dd.style.left = rect.left + 'px';
+  dd.style.top = rect.bottom + 'px';
+  dd.style.minWidth = rect.width + 'px';
+
+  // Header
+  const header = document.createElement('div');
+  header.className = 'tab-menu-header';
+  header.textContent = s.name;
+  dd.appendChild(header);
+
+  // Mute toggle
+  const muteBtn = document.createElement('button');
+  muteBtn.className = 'tab-menu-item';
+  muteBtn.innerHTML = (s.muted ? '&#9834; Unmute' : '&#9834; Mute');
+  muteBtn.onclick = () => { toggleMute(sessionId); closeTabMenu(); };
+  dd.appendChild(muteBtn);
+
+  // Voice section
+  const sep1 = document.createElement('div');
+  sep1.className = 'tab-menu-sep';
+  dd.appendChild(sep1);
+
+  const voiceHeader = document.createElement('div');
+  voiceHeader.className = 'tab-menu-header';
+  voiceHeader.textContent = 'Voice';
+  dd.appendChild(voiceHeader);
+
+  const voiceList = document.createElement('div');
+  voiceList.className = 'tab-menu-voices';
   KOKORO_VOICES.forEach(v => {
     const btn = document.createElement('button');
+    btn.className = 'tab-menu-item';
     btn.textContent = v;
     btn.onclick = () => {
       fetch(TTS_BASE + '/project-voice', {
@@ -782,16 +858,29 @@ function showVoicePicker(sessionId, event) {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({project: s.name, voice: v})
       }).catch(() => {});
-      closeVoicePicker();
+      closeTabMenu();
     };
-    dd.appendChild(btn);
+    voiceList.appendChild(btn);
   });
+  dd.appendChild(voiceList);
+
+  // Close session
+  const sep2 = document.createElement('div');
+  sep2.className = 'tab-menu-sep';
+  dd.appendChild(sep2);
+
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'tab-menu-item danger';
+  closeBtn.textContent = 'Close Session';
+  closeBtn.onclick = () => { closeSession(sessionId); closeTabMenu(); };
+  dd.appendChild(closeBtn);
+
   document.body.appendChild(dd);
-  setTimeout(() => document.addEventListener('click', closeVoicePicker, { once: true }), 0);
+  setTimeout(() => document.addEventListener('click', closeTabMenu, { once: true }), 0);
 }
 
-function closeVoicePicker() {
-  const existing = document.getElementById('voice-picker');
+function closeTabMenu() {
+  const existing = document.querySelector('.tab-menu');
   if (existing) existing.remove();
 }
 
@@ -903,6 +992,28 @@ function createMessengerPane(sid, paneIdx, totalPanes) {
       <button class="mic-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 1a4 4 0 00-4 4v7a4 4 0 008 0V5a4 4 0 00-4-4z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/></svg></button>
       <textarea class="chat-textarea" placeholder="Send a message..." rows="1"></textarea>
       <button class="send-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>
+    </div>
+    <div class="info-toggle" onclick="this.parentElement.querySelector('.info-panel').classList.toggle('open')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="12" height="12"><polyline points="18 15 12 9 6 15"/></svg>
+    </div>
+    <div class="info-panel" data-sid="${sid || ''}">
+      <div class="info-row">
+        <span class="info-label">MODEL</span>
+        <span class="info-value" data-field="model">—</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">CONTEXT</span>
+        <span class="info-value" data-field="context">—</span>
+        <div class="info-bar"><div class="info-bar-fill" data-field="contextBar"></div></div>
+      </div>
+      <div class="info-row">
+        <span class="info-label">OUTPUT</span>
+        <span class="info-value" data-field="tokens">—</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">BRANCH</span>
+        <span class="info-value" data-field="branch">—</span>
+      </div>
     </div>`;
   pane.appendChild(inputArea);
 
@@ -913,8 +1024,16 @@ function createMessengerPane(sid, paneIdx, totalPanes) {
     if (!text || !sid || !sessions[sid]) return;
     const ws = sessions[sid].ws;
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'input', data: text + '\r' }));
+      // Send text and carriage return separately — longer delay for longer text
+      ws.send(JSON.stringify({ type: 'input', data: text }));
+      const delay = Math.max(100, Math.min(text.length * 2, 500));
+      setTimeout(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'input', data: '\r' }));
+        }
+      }, delay);
     }
+    if (sessions[sid]) sessions[sid]._lastSendTime = Date.now();
     addMessengerMessage(sid, 'user', text);
     showMessengerTyping(sid, true);
     textarea.value = '';
@@ -1015,6 +1134,12 @@ function renderMessenger() {
       mp.appendChild(createMessengerPane(sids[i], i, paneCount));
     }
   }
+  // Restore thinking indicators for sessions that are currently thinking
+  for (const sid of sids) {
+    if (sid && sessions[sid] && sessions[sid].isThinking) {
+      showMessengerTyping(sid, true);
+    }
+  }
 }
 
 function isImagePath(text) {
@@ -1088,7 +1213,7 @@ function renderMarkdown(text) {
   return html;
 }
 
-function createMsgBubble(role, text, time) {
+function createMsgBubble(role, text, time, extra) {
   const msg = document.createElement('div');
   msg.className = `msg ${role}`;
   const bubble = document.createElement('div');
@@ -1099,10 +1224,16 @@ function createMsgBubble(role, text, time) {
     bubble.textContent = text;
   }
   msg.appendChild(bubble);
-  if (time) {
-    const meta = document.createElement('div');
-    meta.className = 'msg-meta';
-    meta.textContent = time;
+  const meta = document.createElement('div');
+  meta.className = 'msg-meta';
+  let parts = [];
+  if (time) parts.push(time);
+  if (role === 'assistant' && extra) {
+    if (extra.responseTime) parts.push('<span class="meta-stat">' + extra.responseTime + '</span>');
+    if (extra.tokens > 0) parts.push('<span class="meta-stat">' + extra.tokens + ' tok</span>');
+  }
+  if (parts.length > 0) {
+    meta.innerHTML = parts.join(' <span class="meta-sep">·</span> ');
     msg.appendChild(meta);
   }
   return msg;
@@ -1171,53 +1302,122 @@ function addMessengerImage(sessionId, role, blobUrl, filePath, imageSize) {
   }
 }
 
-function addMessengerMessage(sessionId, role, text) {
+function addMessengerMessage(sessionId, role, text, extra) {
   if (!text || !text.trim()) return;
   const trimmed = text.trim();
-  // Skip image paths — already shown as image bubbles
   if (isImagePath(trimmed) || /^\[Image:/.test(trimmed)) return;
   if (!messengerMessages[sessionId]) messengerMessages[sessionId] = [];
-  // Deduplicate — check last 5 messages for duplicates (JSONL echo / history reload)
   const msgs = messengerMessages[sessionId];
   for (let i = Math.max(0, msgs.length - 5); i < msgs.length; i++) {
     if (msgs[i].role === role && msgs[i].text === trimmed) return;
   }
   const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  msgs.push({ role, text: trimmed, time });
+  const meta = { responseTime: extra?.responseTime, tokens: extra?.tokens };
+  msgs.push({ role, text: trimmed, time, meta });
 
-  // Remove typing indicator
-  showMessengerTyping(sessionId, false);
+  // Remove typing indicator only for assistant messages
+  if (role === 'assistant') showMessengerTyping(sessionId, false);
 
-  // If messenger is visible, append the bubble live
   if (viewMode === 'messenger') {
     const panes = document.querySelectorAll('.messenger-split-pane');
     for (const pane of panes) {
       if (pane.dataset.sessionId === sessionId) {
         const chatArea = pane.querySelector('.chat-messages');
-        chatArea.appendChild(createMsgBubble(role, text.trim(), time));
+        const bubble = createMsgBubble(role, text.trim(), time, meta);
+        if (role === 'assistant') {
+          // Assistant response goes BEFORE the typing indicator (replacing it)
+          const typing = chatArea.querySelector('.typing');
+          if (typing) {
+            chatArea.insertBefore(bubble, typing);
+          } else {
+            chatArea.appendChild(bubble);
+          }
+        } else {
+          // User message goes at the bottom (after typing indicator)
+          chatArea.appendChild(bubble);
+        }
         chatArea.scrollTop = chatArea.scrollHeight;
       }
     }
   }
 }
 
-function showMessengerTyping(sessionId, show) {
+const toolVerbs = {
+  'Read': 'Reading...', 'Edit': 'Editing...', 'Write': 'Writing...',
+  'Bash': 'Running command...', 'Grep': 'Searching...', 'Glob': 'Searching files...',
+  'Agent': 'Launching agent...', 'WebSearch': 'Searching web...',
+  'WebFetch': 'Fetching page...', 'Skill': 'Running skill...',
+  'NotebookEdit': 'Editing notebook...', 'ToolSearch': 'Finding tools...',
+  'SendMessage': 'Messaging agent...',
+};
+
+function showMessengerTyping(sessionId, show, tools, agents) {
   if (viewMode !== 'messenger') return;
   const panes = document.querySelectorAll('.messenger-split-pane');
   for (const pane of panes) {
     if (pane.dataset.sessionId === sessionId) {
       const chatArea = pane.querySelector('.chat-messages');
       let existing = chatArea.querySelector('.typing');
-      if (show && !existing) {
-        const typing = document.createElement('div');
-        typing.className = 'msg typing';
-        typing.innerHTML = '<div class="typing-dots"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div>';
-        chatArea.appendChild(typing);
+      if (show) {
+        if (!existing) {
+          existing = document.createElement('div');
+          existing.className = 'msg typing';
+          chatArea.appendChild(existing);
+        }
+        // Determine current phase from the session state
+        const s = sessions[sessionId];
+        const lastTool = tools && tools.length > 0 ? tools[tools.length - 1] : null;
+        const phase = lastTool ? (toolVerbs[lastTool] || lastTool + '...') : 'Thinking...';
+
+        let html = '<div class="typing-row">';
+        // Phase status (replaces dots)
+        html += '<div class="typing-status"><span class="status-text">' + phase + '</span></div>';
+        // Tool history badges
+        if (tools && tools.length > 0) {
+          html += '<div class="typing-tools">';
+          for (const t of tools) {
+            const isAgent = t === 'Agent';
+            html += '<span class="tool-badge' + (isAgent ? ' agent' : '') + '">' + t + '</span>';
+          }
+          html += '</div>';
+        }
+        if (agents && agents > 0) {
+          html += '<span class="agent-count">' + agents + ' agent' + (agents > 1 ? 's' : '') + '</span>';
+        }
+        // Token count if available
+        if (s && s._outputTokens > 0) {
+          html += '<span class="token-count">' + s._outputTokens + ' tok</span>';
+        }
+        html += '</div>';
+        existing.innerHTML = html;
         chatArea.scrollTop = chatArea.scrollHeight;
       } else if (!show && existing) {
         existing.remove();
       }
     }
+  }
+}
+
+function updateInfoPanel(sessionId, msg) {
+  if (!msg) return;
+  const panels = document.querySelectorAll('.info-panel[data-sid="' + sessionId + '"]');
+  for (const panel of panels) {
+    const contextUsed = msg.contextUsed || 0;
+    const contextMax = 1000000;
+    const pct = Math.round((contextUsed / contextMax) * 100);
+    const contextK = Math.round(contextUsed / 1000);
+    const modelField = panel.querySelector('[data-field="model"]');
+    if (modelField) modelField.textContent = 'Opus 4.6 (1M)';
+    const contextField = panel.querySelector('[data-field="context"]');
+    if (contextField) contextField.textContent = contextK + 'K / 1M (' + pct + '%)';
+    const bar = panel.querySelector('[data-field="contextBar"]');
+    if (bar) {
+      bar.style.width = pct + '%';
+      bar.style.background = pct > 80 ? 'var(--red)' : pct > 50 ? 'var(--amber)' : 'var(--accent2)';
+    }
+    const tokensField = panel.querySelector('[data-field="tokens"]');
+    const s = sessions[sessionId];
+    if (tokensField && s) tokensField.textContent = (s._outputTokens || 0) + ' tokens';
   }
 }
 
