@@ -41,9 +41,11 @@ const activeTerminals = {};
 const claimedProjects = new Set();
 
 function claimProject(project) {
-    if (claimedProjects.has(project)) return;
-    claimedProjects.add(project);
-    const data = JSON.stringify({ project, claimed: true });
+    // Stream watcher uses last segment of JSONL path (e.g. 'Command-Center')
+    const claimName = project.replace(/ /g, '-');
+    if (claimedProjects.has(claimName)) return;
+    claimedProjects.add(claimName);
+    const data = JSON.stringify({ project: claimName, claimed: true });
     const req = http.request({ hostname: '127.0.0.1', port: 7123, path: '/claim-project', method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
     }, () => {});
@@ -53,9 +55,10 @@ function claimProject(project) {
 }
 
 function releaseProject(project) {
-    if (!claimedProjects.has(project)) return;
-    claimedProjects.delete(project);
-    const data = JSON.stringify({ project, claimed: false });
+    const claimName = project.replace(/ /g, '-');
+    if (!claimedProjects.has(claimName)) return;
+    claimedProjects.delete(claimName);
+    const data = JSON.stringify({ project: claimName, claimed: false });
     const req = http.request({ hostname: '127.0.0.1', port: 7123, path: '/claim-project', method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
     }, () => {});
@@ -87,6 +90,7 @@ class TTSTap {
         this.inCodeBlock = false;
         this.sentencesSent = new Set();
         this.echoPending = '';
+        this.muted = false;
     }
 
     _cleanMarkdown(text) {
@@ -141,6 +145,7 @@ class TTSTap {
     }
 
     feed(rawData) {
+        if (this.muted) return;
         let plain = rawData.replace(ANSI_RE, '');
         if (!plain.trim()) return;
 
@@ -202,7 +207,7 @@ class TTSTap {
     }
 
     feedClean(text) {
-        // Process clean text from JSONL
+        if (this.muted) return;
         const lines = text.split('\n');
         for (const line of lines) {
             const cleaned = this._cleanMarkdown(line);
@@ -232,7 +237,7 @@ function startReader(sessionKey) {
 
     if (sessionKey.endsWith(':claude')) {
         const proj = sessionKey.split(':')[0];
-        ttsTap = new TTSTap(proj);
+        ttsTap = new TTSTap(proj.replace(/ /g, '-'));
         entry.ttsTap = ttsTap;
     }
 
@@ -240,7 +245,7 @@ function startReader(sessionKey) {
     if (sessionKey.endsWith(':claude')) {
         const proj = sessionKey.split(':')[0];
         const projectPath = path.join(PROJECTS_DIR, proj);
-        const claudeProjKey = projectPath.replace(/\\/g, '-').replace(/\//g, '-').replace(/:/g, '-');
+        const claudeProjKey = projectPath.replace(/\\/g, '-').replace(/\//g, '-').replace(/:/g, '-').replace(/ /g, '-').replace(/ /g, '-');
         const convDir = path.join(CLAUDE_PROJECTS_DIR, claudeProjKey);
 
         // Find and watch the latest JSONL file
@@ -695,7 +700,7 @@ function handleApiSessions(req, res) {
         return;
     }
 
-    const claudeProjKey = projectPath.replace(/\\/g, '-').replace(/\//g, '-').replace(/:/g, '-');
+    const claudeProjKey = projectPath.replace(/\\/g, '-').replace(/\//g, '-').replace(/:/g, '-').replace(/ /g, '-');
     const convDir = path.join(CLAUDE_PROJECTS_DIR, claudeProjKey);
 
     if (!fs.existsSync(convDir) || !fs.statSync(convDir).isDirectory()) {
@@ -773,7 +778,7 @@ function handleApiConversation(req, res) {
         return;
     }
 
-    const claudeProjKey = projectPath.replace(/\\/g, '-').replace(/\//g, '-').replace(/:/g, '-');
+    const claudeProjKey = projectPath.replace(/\\/g, '-').replace(/\//g, '-').replace(/:/g, '-').replace(/ /g, '-');
     const convDir = path.join(CLAUDE_PROJECTS_DIR, claudeProjKey);
 
     if (!fs.existsSync(convDir) || !fs.statSync(convDir).isDirectory()) {
@@ -1161,6 +1166,94 @@ async function requestHandler(req, res) {
                 fs.writeFileSync(starsFile, JSON.stringify(existing, null, 2));
                 sendJson(res, { ok: true, starred: idx < 0 });
             } catch(e) { sendJson(res, { error: e.message }, 500); }
+        } else if (req.method === 'GET' && pathname === '/api/notes') {
+            const name = new URL(req.url, 'https://localhost').searchParams.get('name') || '';
+            const notesFile = name ? path.join(PROJECTS_DIR, name, '.tterm_notes.json') : path.join(__dirname, '.tterm_notes.json');
+            try {
+                const data = fs.existsSync(notesFile) ? JSON.parse(fs.readFileSync(notesFile, 'utf-8')) : [];
+                sendJson(res, data);
+            } catch(e) { sendJson(res, []); }
+        } else if (req.method === 'POST' && pathname === '/api/notes') {
+            const body = await readBody(req);
+            const { name, note } = JSON.parse(body.toString('utf-8'));
+            const notesFile = name ? path.join(PROJECTS_DIR, name, '.tterm_notes.json') : path.join(__dirname, '.tterm_notes.json');
+            try {
+                const existing = fs.existsSync(notesFile) ? JSON.parse(fs.readFileSync(notesFile, 'utf-8')) : [];
+                existing.push(note);
+                fs.writeFileSync(notesFile, JSON.stringify(existing, null, 2));
+                sendJson(res, { ok: true });
+            } catch(e) { sendJson(res, { error: e.message }, 500); }
+        } else if (req.method === 'DELETE' && pathname === '/api/notes') {
+            const body = await readBody(req);
+            const { name, ts } = JSON.parse(body.toString('utf-8'));
+            const notesFile = name ? path.join(PROJECTS_DIR, name, '.tterm_notes.json') : path.join(__dirname, '.tterm_notes.json');
+            try {
+                const existing = fs.existsSync(notesFile) ? JSON.parse(fs.readFileSync(notesFile, 'utf-8')) : [];
+                const filtered = existing.filter(n => n.ts !== ts);
+                fs.writeFileSync(notesFile, JSON.stringify(filtered, null, 2));
+                sendJson(res, { ok: true });
+            } catch(e) { sendJson(res, { error: e.message }, 500); }
+        } else if (req.method === 'GET' && pathname === '/api/stats') {
+            const name = new URL(req.url, 'https://localhost').searchParams.get('name') || '';
+            const projectPath = path.join(PROJECTS_DIR, name);
+            const claudeProjKey = projectPath.replace(/\\/g, '-').replace(/\//g, '-').replace(/:/g, '-').replace(/ /g, '-');
+            const convDir = path.join(CLAUDE_PROJECTS_DIR, claudeProjKey);
+            try {
+                if (!fs.existsSync(convDir)) { sendJson(res, {}); return; }
+                const files = fs.readdirSync(convDir).filter(f => f.endsWith('.jsonl'));
+                if (files.length === 0) { sendJson(res, {}); return; }
+                let latest = null, latestMtime = 0;
+                for (const f of files) {
+                    const fp = path.join(convDir, f);
+                    const mt = fs.statSync(fp).mtimeMs;
+                    if (mt > latestMtime) { latestMtime = mt; latest = fp; }
+                }
+                const content = fs.readFileSync(latest, 'utf-8');
+                const lines = content.split('\n').filter(l => l.trim());
+                let lastContext = 0, totalOutput = 0, model = '';
+                for (const line of lines) {
+                    try {
+                        const obj = JSON.parse(line);
+                        if (obj.type === 'assistant' && obj.message?.usage) {
+                            const u = obj.message.usage;
+                            lastContext = u.cache_read_input_tokens || u.input_tokens || lastContext;
+                            totalOutput += u.output_tokens || 0;
+                        }
+                        if (obj.type === 'assistant' && obj.message?.model) {
+                            model = obj.message.model;
+                        }
+                    } catch(e) {}
+                }
+                const mediaFile = path.join(PROJECTS_DIR, name, '.tterm_media.json');
+                let imageCount = 0, imageBytes = 0;
+                try {
+                    if (fs.existsSync(mediaFile)) {
+                        const media = JSON.parse(fs.readFileSync(mediaFile, 'utf-8'));
+                        imageCount = media.length;
+                        imageBytes = media.reduce((sum, m) => sum + (m.size || 0), 0);
+                    }
+                } catch(e) {}
+                sendJson(res, { context: lastContext, outputTokens: totalOutput, model, imageCount, imageBytes });
+            } catch(e) { sendJson(res, {}); }
+        } else if (req.method === 'POST' && pathname === '/api/mute') {
+            const body = await readBody(req);
+            const { name, muted } = JSON.parse(body.toString('utf-8'));
+            const key = name + ':claude';
+            if (activeTerminals[key] && activeTerminals[key].ttsTap) {
+                activeTerminals[key].ttsTap.muted = !!muted;
+                log(`TTS ${muted ? 'muted' : 'unmuted'}: ${name}`);
+            }
+            // Also tell TTS server to mute/unmute this project
+            const muteProject = name.replace(/ /g, '-');
+            try {
+                const muteData = JSON.stringify({ project: muteProject, muted: !!muted });
+                const muteReq = http.request({ hostname: '127.0.0.1', port: 7123, path: '/project-voice', method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(muteData) },
+                }, () => {});
+                muteReq.on('error', () => {});
+                muteReq.end(muteData);
+            } catch(e) {}
+            sendJson(res, { ok: true, muted: !!muted });
         } else if (req.method === 'GET' && pathname === '/api/favorites') {
             try {
                 const favs = fs.existsSync(FAVORITES_FILE) ? JSON.parse(fs.readFileSync(FAVORITES_FILE, 'utf-8')) : [];

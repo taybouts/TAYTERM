@@ -5,7 +5,8 @@ const sessions = {};  // { id: { name, term, ws, fitAddon, container, isShell } 
 let activeSessionId = null;
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
 const isIPadOS = navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1 && !/Windows/.test(navigator.userAgent);
-const isMobile = (isIOS || isIPadOS) && screen.width <= 1400;
+const isIPad = isIPadOS || /iPad/.test(navigator.userAgent);
+const isMobile = isIOS && !isIPad && screen.width <= 500;
 const TTS_BASE = window.location.protocol + '//' + window.location.hostname + ':7123';
 const KOKORO_VOICES = [
   'am_onyx','am_adam','am_michael','am_fenrir','am_puck','am_liam',
@@ -148,7 +149,14 @@ function favClick(name) {
   const p = allProjects.find(pr => pr.name === name);
   if (!p) return;
   if (isMobile) { mobileOpenSession(name, p.can_continue); return; }
-  p.can_continue ? continueSession(name) : openSession(name, false);
+  // If already open in a tab, just switch to it
+  const id = name + ':claude';
+  if (sessions[id]) { switchTab(id); hidePicker(); return; }
+  if (p.can_continue) {
+    showSessionChoice(name);
+  } else {
+    openSession(name, false);
+  }
 }
 
 function renderHeroStatus(projects, pinned) {
@@ -271,7 +279,13 @@ function cardClick(name) {
   const p = allProjects.find(pr => pr.name === name);
   if (!p) return;
   if (isMobile) { mobileOpenSession(name, p.can_continue); return; }
-  p.can_continue ? continueSession(name) : openSession(name, false);
+  const id = name + ':claude';
+  if (sessions[id]) { switchTab(id); hidePicker(); return; }
+  if (p.can_continue) {
+    showSessionChoice(name);
+  } else {
+    openSession(name, false);
+  }
 }
 
 function toggleFav(name) {
@@ -309,6 +323,7 @@ function hidePicker() {
   if (clock) clock.style.opacity = '0';
 }
 
+let lastProjectsLoad = 0;
 function showPicker() {
   document.getElementById('picker').style.display = '';
   // Skip animations on return visits
@@ -321,7 +336,16 @@ function showPicker() {
   if (Object.keys(sessions).length === 0) {
     document.getElementById('terminal-view').classList.remove('active');
   }
-  loadProjects();
+  // Load projects if not loaded yet
+  if (allProjects.length === 0) loadProjects();
+}
+
+function showSessionChoice(name) {
+  showConfirm('Continue previous session or start new?', () => {
+    continueSession(name);
+  }, 'Continue', () => {
+    openSession(name, false);
+  }, 'New');
 }
 
 // ══════════════════════════════════════════
@@ -331,10 +355,26 @@ async function confirmNewSession(name) {
   showConfirm('Start a fresh Claude session?', () => openSession(name, false));
 }
 
-function showConfirm(msg, onYes) {
+function showConfirm(msg, onYes, yesLabel, onAlt, altLabel) {
   document.getElementById('confirm-msg').textContent = msg;
   const yes = document.getElementById('confirm-yes');
+  yes.textContent = yesLabel || 'Yes';
   yes.onclick = () => { closeConfirm(); onYes(); };
+  // Optional second action button
+  let altBtn = document.getElementById('confirm-alt');
+  if (onAlt && altLabel) {
+    if (!altBtn) {
+      altBtn = document.createElement('button');
+      altBtn.id = 'confirm-alt';
+      altBtn.className = yes.className;
+      yes.parentNode.insertBefore(altBtn, yes.nextSibling);
+    }
+    altBtn.textContent = altLabel;
+    altBtn.style.display = '';
+    altBtn.onclick = () => { closeConfirm(); onAlt(); };
+  } else if (altBtn) {
+    altBtn.style.display = 'none';
+  }
   document.getElementById('confirm-modal').classList.add('active');
 }
 function closeConfirm() {
@@ -460,6 +500,28 @@ function openSession(name, isShell, continueFlag, resumeId) {
     return;
   }
 
+  // Fresh session — kill old PTY, clear messenger
+  if (!continueFlag && !resumeId && !isShell) {
+    delete messengerMessages[id];
+    delete cachedPanes[id];
+    messengerMessages[id] = []; // Empty array = don't load history
+    // Kill server-side PTY so we don't reattach to old session, then proceed
+    fetch('/api/kill', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name })
+    }).then(() => {
+      setTimeout(() => _doOpenSession(name, isShell, continueFlag, resumeId, id), 300);
+    }).catch(() => {
+      _doOpenSession(name, isShell, continueFlag, resumeId, id);
+    });
+    return;
+  }
+
+  _doOpenSession(name, isShell, continueFlag, resumeId, id);
+}
+
+function _doOpenSession(name, isShell, continueFlag, resumeId, id) {
   // Show terminal view, hide picker
   hidePicker();
   document.getElementById('terminal-view').classList.add('active');
@@ -569,6 +631,12 @@ function openSession(name, isShell, continueFlag, resumeId) {
       if (msg.type === 'output') {
         term.write(msg.data);
         dismissLoader();
+        // Detect Claude prompt — means Claude is idle
+        if (sessions[id]?.isThinking && /\n>\s*$|\r>\s*$/.test(msg.data)) {
+          sessions[id].isThinking = false;
+          sessions[id].toolHistory = [];
+          showMessengerTyping(id, false);
+        }
       } else if (msg.type === 'chat') {
         // Calculate response time from when user last sent
         let responseTime = '';
@@ -585,6 +653,7 @@ function openSession(name, isShell, continueFlag, resumeId) {
             sessions[id].isThinking = false;
             sessions[id].toolHistory = [];
             sessions[id]._outputTokens = 0;
+            sessions[id]._currentResponseTokens = 0;
             // Don't reset activeAgents here — keep showing until next user message
           }
           showMessengerTyping(id, false);
@@ -605,6 +674,7 @@ function openSession(name, isShell, continueFlag, resumeId) {
           sessions[id].isThinking = true;
           if (!sessions[id].toolHistory) sessions[id].toolHistory = [];
           sessions[id]._outputTokens = (sessions[id]._outputTokens || 0) + (msg.outputTokens || 0);
+          sessions[id]._currentResponseTokens = (sessions[id]._currentResponseTokens || 0) + (msg.outputTokens || 0);
         }
         showMessengerTyping(id, true, sessions[id]?.toolHistory, sessions[id]?.activeAgents);
         updateInfoPanel(id, msg);
@@ -613,6 +683,7 @@ function openSession(name, isShell, continueFlag, resumeId) {
           sessions[id].isThinking = true;
           if (!sessions[id].toolHistory) sessions[id].toolHistory = [];
           sessions[id]._outputTokens = (sessions[id]._outputTokens || 0) + (msg.outputTokens || 0);
+          sessions[id]._currentResponseTokens = (sessions[id]._currentResponseTokens || 0) + (msg.outputTokens || 0);
           for (const t of (msg.tools || [])) {
             sessions[id].toolHistory.push(t);
             if (t === 'Agent') sessions[id].activeAgents = (sessions[id].activeAgents || 0) + 1;
@@ -764,6 +835,7 @@ function closeSession(id) {
   if (session.term) session.term.dispose();
   if (session.container && session.container.parentNode) session.container.parentNode.removeChild(session.container);
   delete sessions[id];
+  delete cachedPanes[id];
 
   // Remove from pane slots
   paneSlots = paneSlots.map(s => s === id ? null : s);
@@ -890,10 +962,11 @@ function toggleMute(id) {
   if (!sessions[id]) return;
   const s = sessions[id];
   s.muted = !s.muted;
-  fetch(TTS_BASE + '/tts-state', {
+  // Tell T-Term server to mute/unmute TTS for this project
+  fetch('/api/mute', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({project: s.name, state: s.muted ? 'muted' : 'default'})
+    body: JSON.stringify({ name: s.name, muted: s.muted })
   }).catch(() => {});
   renderTabs();
   saveState();
@@ -923,8 +996,13 @@ function switchTab(id) {
   }
 
   renderTabs();
-  renderPanes();
+  if (viewMode === 'split') {
+    renderSplitView();
+  } else {
+    renderPanes();
+  }
   saveState();
+  loadStats(id);
 }
 
 // ══════════════════════════════════════════
@@ -1014,6 +1092,19 @@ function renderSplitView() {
   sendBtn.onclick = sendMsg;
   textarea.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMsg(); } });
   textarea.addEventListener('input', () => { textarea.style.height = '44px'; if (textarea.scrollHeight > 44) textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px'; });
+  // Paste image in split view
+  textarea.addEventListener('paste', (e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        const blob = item.getAsFile();
+        if (blob) uploadScreenshot(blob);
+        return;
+      }
+    }
+  });
 
   // Load history
   if (!messengerMessages[sid]) {
@@ -1025,9 +1116,10 @@ function renderSplitView() {
     }
     setTimeout(() => { chatArea.scrollTop = chatArea.scrollHeight; }, 50);
   }
-  if (sessions[sid]?.isThinking) showMessengerTyping(sid, true, sessions[sid].toolHistory, sessions[sid].activeAgents);
-
   sv.appendChild(left);
+
+  // Restore thinking indicator after pane is in DOM
+  if (sessions[sid]?.isThinking) showMessengerTyping(sid, true, sessions[sid].toolHistory, sessions[sid].activeAgents);
 
   // Divider
   const divider = document.createElement('div');
@@ -1040,6 +1132,7 @@ function renderSplitView() {
   s.container.style.display = 'flex';
   s.container.style.flex = '1';
   s.container.style.minHeight = '0';
+  s.container.style.margin = '0';
   right.appendChild(s.container);
   sv.appendChild(right);
 
@@ -1047,8 +1140,39 @@ function renderSplitView() {
 }
 
 let selectedMessengerPane = 0;
+const cachedPanes = {}; // { sessionId: DOM element }
 
 function createMessengerPane(sid, paneIdx, totalPanes) {
+  // Return cached pane if it exists
+  if (sid && cachedPanes[sid]) {
+    const cached = cachedPanes[sid];
+    cached.className = 'messenger-split-pane' + (totalPanes > 1 && paneIdx === selectedMessengerPane ? ' selected' : '');
+    // Update pane label and click handler with current paneIdx
+    let label = cached.querySelector('.messenger-pane-label');
+    if (totalPanes > 1) {
+      if (!label && sessions[sid]) {
+        label = document.createElement('div');
+        label.className = 'messenger-pane-label';
+        label.textContent = sessions[sid].name.toUpperCase();
+        cached.insertBefore(label, cached.firstChild);
+      }
+      if (label) label.style.display = '';
+      cached.onclick = (e) => {
+        if (e.target.closest('.chat-input-area')) return;
+        selectedMessengerPane = paneIdx;
+        selectedPane = paneIdx;
+        activeSessionId = sid;
+        document.querySelectorAll('.messenger-split-pane').forEach((p, j) => {
+          p.classList.toggle('selected', j === selectedMessengerPane);
+        });
+      };
+    } else {
+      if (label) label.style.display = 'none';
+      cached.onclick = null;
+    }
+    return cached;
+  }
+
   const pane = document.createElement('div');
   pane.className = 'messenger-split-pane' + (totalPanes > 1 && paneIdx === selectedMessengerPane ? ' selected' : '');
   if (sid) pane.dataset.sessionId = sid;
@@ -1209,12 +1333,26 @@ function createMessengerPane(sid, paneIdx, totalPanes) {
     setTimeout(() => { chatArea.scrollTop = chatArea.scrollHeight; }, 50);
   }
 
+  // Restore thinking indicator if session is still thinking
+  if (sid && sessions[sid]?.isThinking) {
+    showMessengerTyping(sid, true, sessions[sid].toolHistory, sessions[sid].activeAgents);
+  }
+
+  // Cache the pane
+  if (sid) cachedPanes[sid] = pane;
+
   return pane;
 }
 
 function renderMessenger() {
   const mp = document.getElementById('messengerPane');
-  mp.innerHTML = '';
+  // Save scroll positions onto cached elements before detaching
+  mp.querySelectorAll('.messenger-split-pane').forEach(p => {
+    const chat = p.querySelector('.chat-messages');
+    if (chat) p.dataset.savedScroll = chat.scrollTop;
+  });
+  // Detach children (don't destroy — they're cached)
+  while (mp.firstChild) mp.removeChild(mp.firstChild);
   const paneCount = { single: 1, hsplit: 2, vsplit: 2, triple: 3, quad: 4 }[layout] || 1;
   const sids = [];
   for (let i = 0; i < paneCount; i++) {
@@ -1258,6 +1396,16 @@ function renderMessenger() {
       showMessengerTyping(sid, true);
     }
   }
+  // Restore scroll positions after layout settles
+  setTimeout(() => {
+    mp.querySelectorAll('.messenger-split-pane').forEach(p => {
+      const chat = p.querySelector('.chat-messages');
+      if (chat && p.dataset.savedScroll) {
+        chat.scrollTop = parseInt(p.dataset.savedScroll);
+        delete p.dataset.savedScroll;
+      }
+    });
+  }, 20);
 }
 
 function isImagePath(text) {
@@ -1593,6 +1741,92 @@ function renderTrayPanel(panel) {
     } else {
       content.innerHTML = '<div style="padding:20px;text-align:center;font-family:var(--font-mono);font-size:11px;color:var(--text3)">No active project</div>';
     }
+  } else if (panel === 'notes') {
+    setHeader('Notes');
+
+    // Scope selector: General or current project
+    const scopeBar = document.createElement('div');
+    scopeBar.className = 'notes-scope';
+    const projectName = activeSessionId && sessions[activeSessionId] ? sessions[activeSessionId].name : '';
+    let noteScope = 'general';
+
+    const btnGeneral = document.createElement('button');
+    btnGeneral.className = 'notes-scope-btn active';
+    btnGeneral.textContent = 'General';
+    btnGeneral.onclick = () => { noteScope = 'general'; btnGeneral.classList.add('active'); btnProject.classList.remove('active'); loadNotes(); };
+
+    const btnProject = document.createElement('button');
+    btnProject.className = 'notes-scope-btn';
+    btnProject.textContent = projectName || 'Project';
+    btnProject.disabled = !projectName;
+    btnProject.onclick = () => { noteScope = 'project'; btnProject.classList.add('active'); btnGeneral.classList.remove('active'); loadNotes(); };
+
+    scopeBar.appendChild(btnGeneral);
+    scopeBar.appendChild(btnProject);
+    content.appendChild(scopeBar);
+
+    // Input
+    const noteInput = document.createElement('textarea');
+    noteInput.className = 'notes-input';
+    noteInput.placeholder = 'Quick note...';
+    noteInput.rows = 2;
+    content.appendChild(noteInput);
+
+    const addBtn = document.createElement('button');
+    addBtn.className = 'notes-add-btn';
+    addBtn.textContent = 'Add Note';
+    addBtn.onclick = async () => {
+      const text = noteInput.value.trim();
+      if (!text) return;
+      const name = noteScope === 'project' ? projectName : '';
+      await fetch('/api/notes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, note: { text, ts: Date.now(), time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), date: new Date().toLocaleDateString(), project: name || 'general' } })
+      });
+      noteInput.value = '';
+      loadNotes();
+    };
+    content.appendChild(addBtn);
+
+    noteInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); addBtn.click(); }
+    });
+
+    const notesList = document.createElement('div');
+    notesList.id = 'notes-list';
+    content.appendChild(notesList);
+
+    async function loadNotes() {
+      const name = noteScope === 'project' ? projectName : '';
+      try {
+        const resp = await fetch('/api/notes?name=' + encodeURIComponent(name));
+        const notes = await resp.json();
+        notesList.innerHTML = '';
+        if (notes.length === 0) {
+          notesList.innerHTML = '<div style="padding:16px;text-align:center;font-family:var(--font-mono);font-size:11px;color:var(--text3)">No notes yet</div>';
+          return;
+        }
+        for (const n of [...notes].reverse()) {
+          const card = document.createElement('div');
+          card.className = 'flag-card note-card';
+          card.innerHTML = '<div class="flag-card-text">' + n.text + '</div>'
+            + '<div class="flag-card-time">' + (n.date || '') + ' · ' + (n.time || '') + '</div>';
+          const delBtn = document.createElement('button');
+          delBtn.className = 'note-delete';
+          delBtn.innerHTML = '&times;';
+          delBtn.onclick = async (e) => {
+            e.stopPropagation();
+            await fetch('/api/notes', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, ts: n.ts }) });
+            loadNotes();
+          };
+          card.appendChild(delBtn);
+          notesList.appendChild(card);
+        }
+      } catch(e) { notesList.innerHTML = '<div style="padding:16px;text-align:center;font-family:var(--font-mono);font-size:11px;color:var(--text3)">Failed to load</div>'; }
+    }
+    loadNotes();
+    setTimeout(() => noteInput.focus(), 100);
   }
 
   body.appendChild(content);
@@ -1729,15 +1963,14 @@ function addMessengerImage(sessionId, role, blobUrl, filePath, imageSize, mediaT
   if (!messengerMessages[sessionId]) messengerMessages[sessionId] = [];
   messengerMessages[sessionId].push({ role, type: 'image', blobUrl, filePath, time, sizeInfo, ts });
 
-  if (viewMode === 'messenger') {
-    const panes = document.querySelectorAll('.messenger-split-pane');
-    for (const pane of panes) {
-      if (pane.dataset.sessionId === sessionId) {
-        const chatArea = pane.querySelector('.chat-messages');
-        chatArea.appendChild(createImageBubble(role, blobUrl, time, sizeInfo, ts));
-        chatArea.scrollTop = chatArea.scrollHeight;
-      }
-    }
+  const allPanes = document.querySelectorAll('.messenger-split-pane, .split-messenger');
+  for (const pane of allPanes) {
+    if (pane.dataset.sessionId !== sessionId) continue;
+    if (pane.closest('.messenger-pane:not(.active)') || pane.closest('.split-view:not(.active)')) continue;
+    const chatArea = pane.querySelector('.chat-messages');
+    if (!chatArea) continue;
+    chatArea.appendChild(createImageBubble(role, blobUrl, time, sizeInfo, ts));
+    chatArea.scrollTop = chatArea.scrollHeight;
   }
 }
 
@@ -1776,27 +2009,26 @@ function addMessengerMessage(sessionId, role, text, extra) {
   // Remove typing indicator only for assistant messages
   if (role === 'assistant') showMessengerTyping(sessionId, false);
 
-  if (viewMode === 'messenger') {
-    const panes = document.querySelectorAll('.messenger-split-pane');
-    for (const pane of panes) {
-      if (pane.dataset.sessionId === sessionId) {
-        const chatArea = pane.querySelector('.chat-messages');
-        const bubble = createMsgBubble(role, text.trim(), time, meta);
-        if (role === 'assistant') {
-          // Assistant response goes BEFORE the typing indicator (replacing it)
-          const typing = chatArea.querySelector('.typing');
-          if (typing) {
-            chatArea.insertBefore(bubble, typing);
-          } else {
-            chatArea.appendChild(bubble);
-          }
-        } else {
-          // User message goes at the bottom (after typing indicator)
-          chatArea.appendChild(bubble);
-        }
-        chatArea.scrollTop = chatArea.scrollHeight;
+  // Render in any visible chat area for this session
+  const allPanes = document.querySelectorAll('.messenger-split-pane, .split-messenger');
+  for (const pane of allPanes) {
+    const paneSid = pane.dataset.sessionId;
+    if (paneSid !== sessionId) continue;
+    if (pane.closest('.messenger-pane:not(.active)') || pane.closest('.split-view:not(.active)')) continue;
+    const chatArea = pane.querySelector('.chat-messages');
+    if (!chatArea) continue;
+    const bubble = createMsgBubble(role, text.trim(), time, meta);
+    if (role === 'assistant') {
+      const typing = chatArea.querySelector('.typing');
+      if (typing) {
+        chatArea.insertBefore(bubble, typing);
+      } else {
+        chatArea.appendChild(bubble);
       }
+    } else {
+      chatArea.appendChild(bubble);
     }
+    chatArea.scrollTop = chatArea.scrollHeight;
   }
 }
 
@@ -1820,6 +2052,9 @@ function showMessengerTyping(sessionId, show, tools, agents) {
         if (!existing) {
           existing = document.createElement('div');
           existing.className = 'msg typing';
+          existing.title = 'Click to cancel';
+          existing.style.cursor = 'pointer';
+          existing.onclick = () => cancelClaude(sessionId);
           chatArea.appendChild(existing);
         }
         // Determine current phase from the session state
@@ -1843,8 +2078,8 @@ function showMessengerTyping(sessionId, show, tools, agents) {
           html += '<span class="agent-count">' + agents + ' agent' + (agents > 1 ? 's' : '') + '</span>';
         }
         // Token count if available
-        if (s && s._outputTokens > 0) {
-          html += '<span class="token-count">' + s._outputTokens + ' tok</span>';
+        if (s && s._currentResponseTokens > 0) {
+          html += '<span class="token-count">' + s._currentResponseTokens + ' tok</span>';
         }
         html += '</div>';
         existing.innerHTML = html;
@@ -1855,6 +2090,35 @@ function showMessengerTyping(sessionId, show, tools, agents) {
     }
   }
 }
+
+function cancelClaude(sessionId) {
+  const s = sessions[sessionId];
+  if (s && s.ws && s.ws.readyState === WebSocket.OPEN) {
+    s.ws.send(JSON.stringify({ type: 'input', data: '\x1b' }));
+    // Show cancelled state on the thinking bubble
+    const panes = document.querySelectorAll('.messenger-split-pane, .split-messenger');
+    for (const pane of panes) {
+      const typing = pane.querySelector('.typing');
+      if (typing) {
+        typing.innerHTML = '<div class="typing-row"><div class="typing-status cancelled"><span class="status-text">Interrupted</span></div></div>';
+        typing.style.cursor = 'default';
+        typing.onclick = null;
+        setTimeout(() => typing.remove(), 2000);
+      }
+    }
+    if (s) { s.isThinking = false; s.toolHistory = []; }
+  }
+}
+
+// Escape key cancels Claude in messenger
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && (viewMode === 'messenger' || viewMode === 'split')) {
+    const s = sessions[activeSessionId];
+    if (s && s.isThinking) {
+      cancelClaude(activeSessionId);
+    }
+  }
+});
 
 function updateInfoPanel(sessionId, msg) {
   if (!msg) return;
@@ -1894,6 +2158,21 @@ function updateInfoPanel(sessionId, msg) {
       agentWrap.style.display = 'none';
     }
   }
+}
+
+async function loadStats(sessionId) {
+  const s = sessions[sessionId];
+  if (!s || s.isShell) return;
+  try {
+    const resp = await fetch('/api/stats?name=' + encodeURIComponent(s.name));
+    const stats = await resp.json();
+    if (stats.context) {
+      s._outputTokens = stats.outputTokens || 0;
+      sessionImageCount = stats.imageCount || 0;
+      sessionImageBytes = stats.imageBytes || 0;
+      updateInfoPanel(sessionId, { contextUsed: stats.context, outputTokens: stats.outputTokens, model: stats.model });
+    }
+  } catch(e) {}
 }
 
 // ══════════════════════════════════════════
@@ -2209,15 +2488,15 @@ async function uploadScreenshot(blob) {
       sessionImageBytes += compressed.size;
       sessionImageCount++;
       // Show full quality image in messenger
-      addMessengerImage(activeSessionId, 'user', displayUrl, result.path, compressed.size);
+      addMessengerImage(activeSessionId, 'user', displayUrl, result.path, compressed.size, ts);
       // Save image reference server-side for persistence
       fetch('/api/chat-media', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: projectName, media: { url: displayUrl, time: new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}), size: compressed.size, ts } })
       }).catch(() => {});
-      // In messenger mode, send the image path to PTY immediately
-      if (viewMode === 'messenger') {
+      // In messenger or split mode, send the image path to PTY immediately
+      if (viewMode === 'messenger' || viewMode === 'split') {
         const s = sessions[activeSessionId];
         if (s && s.ws.readyState === WebSocket.OPEN) {
           s.ws.send(JSON.stringify({ type: 'input', data: result.path + '\r' }));
@@ -2312,6 +2591,7 @@ document.addEventListener('drop', (e) => {
   if (isMobile) {
     document.body.classList.add('mobile');
     document.getElementById('terminal-view').classList.remove('active');
+    loadProjects();
     showPicker();
     return;
   }
@@ -2327,9 +2607,9 @@ document.addEventListener('drop', (e) => {
       const sid = tab.name + (tab.isShell ? ':shell' : ':claude');
       if (sessions[sid] && tab.muted) {
         sessions[sid].muted = true;
-        fetch(TTS_BASE + '/tts-state', {
+        fetch('/api/mute', {
           method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({project: tab.name, state: 'muted'})
+          body: JSON.stringify({ name: tab.name, muted: true })
         }).catch(() => {});
       }
     }
@@ -2351,6 +2631,7 @@ document.addEventListener('drop', (e) => {
     showPicker();
   }
   initTrayHover();
+  loadProjects();
 })();
 
 // ══════════════════════════════════════════
