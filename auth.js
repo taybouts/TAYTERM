@@ -26,16 +26,50 @@ try {
 //  Config
 // ---------------------------------------------------------------------------
 
-const PASSKEY_FILE = path.join(path.dirname(path.resolve(__filename)), '.tterm_passkeys.json');
+const BASE_DIR = path.dirname(path.resolve(__filename));
+const PASSKEY_FILE = path.join(BASE_DIR, '.tterm_passkeys.json');
+const WHITELIST_FILE = path.join(BASE_DIR, '.tterm_whitelist.json');
+const AUDIT_FILE = path.join(BASE_DIR, '.tterm_audit.json');
+const USERS_FILE = path.join(BASE_DIR, '.tterm_users.json');
 const SESSION_MAX_AGE = 86400; // 24 hours in seconds
 const TOKEN_MAX_AGE = 5 * 60 * 1000; // 5 minutes
 const COOKIE_NAME = 'tterm_session';
+const WHITELIST_COOKIE = 'tterm_trusted';
 
 // Pending QR sessions: token -> { approved, created, sessionId }
 const pendingSessions = new Map();
 
 // Active sessions: sessionId -> { created, expires, ip, userAgent }
+const SESSIONS_FILE = path.join(BASE_DIR, '.tterm_sessions.json');
 const activeSessions = new Map();
+
+// Load sessions from file on startup
+function loadSessionsFromFile() {
+    try {
+        if (fs.existsSync(SESSIONS_FILE)) {
+            const data = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf-8'));
+            const now = Date.now();
+            for (const [id, session] of Object.entries(data)) {
+                if (session.expires > now) {
+                    activeSessions.set(id, session);
+                }
+            }
+            console.log(`[AUTH] Loaded ${activeSessions.size} active sessions from file`);
+        }
+    } catch (e) { console.error('[AUTH] Failed to load sessions:', e.message); }
+}
+
+function saveSessionsToFile() {
+    try {
+        const obj = {};
+        for (const [id, session] of activeSessions) {
+            obj[id] = session;
+        }
+        fs.writeFileSync(SESSIONS_FILE, JSON.stringify(obj, null, 2), 'utf-8');
+    } catch (e) { console.error('[AUTH] Failed to save sessions:', e.message); }
+}
+
+loadSessionsFromFile();
 
 // Per-token WebAuthn challenges for approval flow
 const pendingChallenges = new Map();
@@ -66,6 +100,80 @@ function hasPasskeys() {
     const data = loadPasskeys();
     return data.passkeys && data.passkeys.length > 0;
 }
+
+// ---------------------------------------------------------------------------
+//  Whitelist Storage (trusted devices that skip auth)
+// ---------------------------------------------------------------------------
+
+function loadWhitelist() {
+    try {
+        if (fs.existsSync(WHITELIST_FILE)) return JSON.parse(fs.readFileSync(WHITELIST_FILE, 'utf-8'));
+    } catch (e) {}
+    return [];
+}
+
+function saveWhitelist(list) {
+    fs.writeFileSync(WHITELIST_FILE, JSON.stringify(list, null, 2), 'utf-8');
+}
+
+function isWhitelisted(req) {
+    const cookies = parseCookies(req);
+    const token = cookies[WHITELIST_COOKIE];
+    if (!token) return false;
+    const list = loadWhitelist();
+    return list.some(d => d.token === token);
+}
+
+function parseCookies(req) {
+    const header = req.headers.cookie || '';
+    const out = {};
+    header.split(';').forEach(c => {
+        const [k, ...v] = c.trim().split('=');
+        if (k) out[k] = v.join('=');
+    });
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+//  Audit Log
+// ---------------------------------------------------------------------------
+
+function loadAudit() {
+    try {
+        if (fs.existsSync(AUDIT_FILE)) return JSON.parse(fs.readFileSync(AUDIT_FILE, 'utf-8'));
+    } catch (e) {}
+    return [];
+}
+
+function logAudit(event, details) {
+    const log = loadAudit();
+    log.unshift({
+        event,
+        time: Date.now(),
+        ...details
+    });
+    // Keep last 200 entries
+    if (log.length > 200) log.length = 200;
+    fs.writeFileSync(AUDIT_FILE, JSON.stringify(log, null, 2), 'utf-8');
+}
+
+// ---------------------------------------------------------------------------
+//  User Storage
+// ---------------------------------------------------------------------------
+
+function loadUsers() {
+    try {
+        if (fs.existsSync(USERS_FILE)) return JSON.parse(fs.readFileSync(USERS_FILE, 'utf-8'));
+    } catch (e) {}
+    return [];
+}
+
+function saveUsers(users) {
+    fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2), 'utf-8');
+}
+
+// Pending registration: stores user profile until passkey is created
+let pendingRegistration = null;
 
 // ---------------------------------------------------------------------------
 //  RP Config (dynamic based on request)
@@ -184,6 +292,7 @@ function createSession(req) {
         host: req ? (req.headers.host || '') : '',
         via: req ? (req.headers['cf-connecting-ip'] ? 'Cloudflare' : req.headers.host?.includes('tse.mesh') ? 'Tailscale' : 'Direct') : '',
     });
+    saveSessionsToFile();
     return sessionId;
 }
 
@@ -192,6 +301,7 @@ function isValidSession(sessionId) {
     const session = activeSessions.get(sessionId);
     if (Date.now() > session.expires) {
         activeSessions.delete(sessionId);
+        saveSessionsToFile();
         return false;
     }
     return true;
@@ -227,11 +337,14 @@ setInterval(() => {
             pendingSessions.delete(token);
         }
     }
+    let sessionsChanged = false;
     for (const [sessionId, data] of activeSessions) {
         if (now > data.expires) {
             activeSessions.delete(sessionId);
+            sessionsChanged = true;
         }
     }
+    if (sessionsChanged) saveSessionsToFile();
     for (const [token, data] of pendingChallenges) {
         if (now - data.created > TOKEN_MAX_AGE) {
             pendingChallenges.delete(token);
@@ -246,6 +359,7 @@ setInterval(() => {
 function isAuthenticated(req) {
     if (!simplewebauthn) return true;
     if (!hasPasskeys()) return true;
+    if (isWhitelisted(req)) return true;
     const sessionId = getSessionFromCookie(req);
     return isValidSession(sessionId);
 }
@@ -284,13 +398,47 @@ async function handleAuthRoute(req, res, pathname) {
         return handleCheck(req, res, url);
     }
 
-    // Registration page
+    // Direct passkey sign-in (no QR needed)
+    if (req.method === 'POST' && pathname === '/auth/passkey-options') {
+        return await handlePasskeyOptions(req, res);
+    }
+    if (req.method === 'POST' && pathname === '/auth/passkey-verify') {
+        return await handlePasskeyVerify(req, res);
+    }
+
+    // Registration — Step 1: Profile form
     if (req.method === 'GET' && pathname === '/register') {
         return serveRegisterPage(req, res);
     }
+    // Registration — Step 1: Save profile, move to passkey
+    if (req.method === 'POST' && pathname === '/register/profile') {
+        const body = await readBody(req);
+        const { username, displayName, email } = JSON.parse(body.toString('utf-8'));
+        if (!username || username.trim().length < 2) {
+            sendJson(res, { error: 'Username is required (min 2 characters)' }, 400);
+            return true;
+        }
+        // Check if username already taken
+        const users = loadUsers();
+        if (users.find(u => u.username.toLowerCase() === username.trim().toLowerCase())) {
+            sendJson(res, { error: 'Username already taken' }, 409);
+            return true;
+        }
+        pendingRegistration = {
+            username: username.trim(),
+            displayName: (displayName || '').trim(),
+            email: (email || '').trim(),
+            created: Date.now(),
+        };
+        logAudit('register_profile', { username: pendingRegistration.username, ip: req.socket.remoteAddress });
+        sendJson(res, { ok: true });
+        return true;
+    }
+    // Registration — Step 2: WebAuthn start
     if (req.method === 'POST' && pathname === '/register/start') {
         return await handleRegisterStart(req, res);
     }
+    // Registration — Step 2: WebAuthn finish
     if (req.method === 'POST' && pathname === '/register/finish') {
         return await handleRegisterFinish(req, res);
     }
@@ -348,11 +496,147 @@ async function handleAuthRoute(req, res, pathname) {
         const { sessionId } = JSON.parse(body.toString('utf-8'));
         if (sessionId && activeSessions.has(sessionId)) {
             activeSessions.delete(sessionId);
+            saveSessionsToFile();
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ok: true }));
         } else {
             res.writeHead(404, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'Session not found' }));
+        }
+        return true;
+    }
+
+    // Admin page
+    if (req.method === 'GET' && pathname === '/admin') {
+        if (!isAuthenticated(req)) { res.writeHead(302, { Location: '/login' }); res.end(); return true; }
+        res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
+        res.end(adminPageHTML());
+        return true;
+    }
+
+    // Admin API — audit log
+    if (req.method === 'GET' && pathname === '/admin/audit') {
+        if (!isAuthenticated(req)) { sendJson(res, { error: 'Unauthorized' }, 401); return true; }
+        sendJson(res, loadAudit());
+        return true;
+    }
+
+    // Admin API — registered devices (passkeys)
+    if (req.method === 'GET' && pathname === '/admin/devices') {
+        if (!isAuthenticated(req)) { sendJson(res, { error: 'Unauthorized' }, 401); return true; }
+        const data = loadPasskeys();
+        const users = loadUsers();
+        const devices = (data.passkeys || []).map((pk, i) => {
+            const user = users.find(u => u.credentialID === pk.credentialID || u.username === pk.username);
+            return {
+                index: i,
+                id: pk.credentialID.slice(0, 12) + '...',
+                username: pk.username || user?.username || '',
+                displayName: user?.displayName || '',
+                email: user?.email || '',
+                role: user?.role || 'user',
+                deviceType: pk.deviceType || 'unknown',
+                backedUp: pk.backedUp || false,
+                registeredAt: pk.registeredAt || 'unknown',
+                counter: pk.counter,
+                label: pk.label || '',
+                browser: pk.browser || '',
+                os: pk.os || '',
+                device: pk.device || '',
+                ip: pk.ip || '',
+            };
+        });
+        sendJson(res, devices);
+        return true;
+    }
+
+    // Admin API — label a device
+    if (req.method === 'POST' && pathname === '/admin/label-device') {
+        if (!isAuthenticated(req)) { sendJson(res, { error: 'Unauthorized' }, 401); return true; }
+        const body = await readBody(req);
+        const { index, label } = JSON.parse(body.toString('utf-8'));
+        const data = loadPasskeys();
+        if (data.passkeys && data.passkeys[index]) {
+            data.passkeys[index].label = label;
+            savePasskeys(data);
+            sendJson(res, { ok: true });
+        } else {
+            sendJson(res, { error: 'Device not found' }, 404);
+        }
+        return true;
+    }
+
+    // Admin API — remove a device
+    if (req.method === 'POST' && pathname === '/admin/remove-device') {
+        if (!isAuthenticated(req)) { sendJson(res, { error: 'Unauthorized' }, 401); return true; }
+        const body = await readBody(req);
+        const { index } = JSON.parse(body.toString('utf-8'));
+        const data = loadPasskeys();
+        if (data.passkeys && data.passkeys[index]) {
+            const removed = data.passkeys.splice(index, 1);
+            savePasskeys(data);
+            logAudit('device_removed', { deviceType: removed[0]?.deviceType });
+            sendJson(res, { ok: true });
+        } else {
+            sendJson(res, { error: 'Device not found' }, 404);
+        }
+        return true;
+    }
+
+    // Admin API — users
+    if (req.method === 'GET' && pathname === '/admin/users') {
+        if (!isAuthenticated(req)) { sendJson(res, { error: 'Unauthorized' }, 401); return true; }
+        sendJson(res, loadUsers());
+        return true;
+    }
+
+    // Admin API — whitelist
+    if (req.method === 'GET' && pathname === '/admin/whitelist') {
+        if (!isAuthenticated(req)) { sendJson(res, { error: 'Unauthorized' }, 401); return true; }
+        sendJson(res, loadWhitelist());
+        return true;
+    }
+
+    // Admin API — whitelist this device
+    if (req.method === 'POST' && pathname === '/admin/whitelist-add') {
+        if (!isAuthenticated(req)) { sendJson(res, { error: 'Unauthorized' }, 401); return true; }
+        const body = await readBody(req);
+        const { label } = JSON.parse(body.toString('utf-8'));
+        const token = crypto.randomBytes(32).toString('hex');
+        const list = loadWhitelist();
+        list.push({
+            token,
+            label: label || 'Unnamed device',
+            ip: req.socket.remoteAddress,
+            created: Date.now(),
+        });
+        saveWhitelist(list);
+        logAudit('whitelist_add', { label, ip: req.socket.remoteAddress });
+        // Set persistent cookie (1 year) — works across subdomains
+        const host = req.headers.host || '';
+        const domainPart = host.includes('taybouts.com') ? '; Domain=.taybouts.com' : '';
+        const cookieOpts = `Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=31536000${domainPart}`;
+        res.writeHead(200, {
+            'Content-Type': 'application/json',
+            'Set-Cookie': `${WHITELIST_COOKIE}=${token}; ${cookieOpts}`
+        });
+        res.end(JSON.stringify({ ok: true }));
+        return true;
+    }
+
+    // Admin API — remove from whitelist
+    if (req.method === 'POST' && pathname === '/admin/whitelist-remove') {
+        if (!isAuthenticated(req)) { sendJson(res, { error: 'Unauthorized' }, 401); return true; }
+        const body = await readBody(req);
+        const { index } = JSON.parse(body.toString('utf-8'));
+        const list = loadWhitelist();
+        if (list[index]) {
+            const removed = list.splice(index, 1);
+            saveWhitelist(list);
+            logAudit('whitelist_remove', { label: removed[0]?.label });
+            sendJson(res, { ok: true });
+        } else {
+            sendJson(res, { error: 'Not found' }, 404);
         }
         return true;
     }
@@ -428,28 +712,7 @@ function serveApprovePage(req, res, url) {
         return true;
     }
 
-    // Auto-approve for Tailscale — already authenticated by mesh network
-    if (isTailscaleRequest(req)) {
-        const sessionId = createSession(req);
-        pending.approved = true;
-        pending.sessionId = sessionId;
-        console.log(`[AUTH] Auto-approved via Tailscale (${req.socket.remoteAddress})`);
-        res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
-        res.end(`<!DOCTYPE html><html><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>T-TERM — Approved</title>
-<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
-<style>*{margin:0;padding:0;box-sizing:border-box}body{min-height:100vh;background:#0a0a0f;color:#e6edf3;display:flex;align-items:center;justify-content:center;font-family:'Segoe UI',sans-serif}
-.card{text-align:center;padding:48px 40px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:24px;backdrop-filter:blur(20px);max-width:340px;width:90%}
-.logo{font-family:'Rajdhani',sans-serif;font-size:32px;font-weight:700;letter-spacing:8px;background:linear-gradient(135deg,#38bdf8,#818cf8,#c084fc);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:8px}
-.check{font-size:48px;margin:16px 0;animation:pop 0.4s ease}
-@keyframes pop{from{transform:scale(0)}to{transform:scale(1)}}
-.msg{font-size:14px;color:#94a3b8;line-height:1.6}
-.sub{font-family:'Share Tech Mono',monospace;font-size:10px;color:#475569;margin-top:16px;letter-spacing:2px}</style></head>
-<body><div class="card"><div class="logo">T-TERM</div><div class="check">&#9989;</div>
-<div class="msg">Access granted</div><div class="sub">You can close this page</div></div></body></html>`);
-        return true;
-    }
+
 
     res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
     res.end(approvePageHTML(token));
@@ -531,6 +794,7 @@ async function handleDoApprove(req, res, url) {
         const sessionId = createSession(req);
         pending.approved = true;
         pending.sessionId = sessionId;
+        logAudit('login_backup', { ip: req.socket.remoteAddress });
         sendJson(res, { ok: true });
         return true;
     }
@@ -571,10 +835,12 @@ async function handleDoApprove(req, res, url) {
         const sessionId = createSession(req);
         pending.approved = true;
         pending.sessionId = sessionId;
+        logAudit('login_passkey', { ip: req.socket.remoteAddress });
 
         sendJson(res, { ok: true });
     } catch (e) {
         console.error('[AUTH] WebAuthn verify error:', e);
+        logAudit('login_failed', { ip: req.socket.remoteAddress, error: e.message });
         sendJson(res, { error: e.message }, 500);
     }
     return true;
@@ -628,26 +894,109 @@ function handleCheck(req, res, url) {
     return true;
 }
 
-function serveRegisterPage(req, res) {
-    if (hasPasskeys()) {
-        res.writeHead(302, { Location: '/login' });
-        res.end();
+// ---------------------------------------------------------------------------
+//  Direct Passkey Sign-in (device authenticates itself)
+// ---------------------------------------------------------------------------
+
+async function handlePasskeyOptions(req, res) {
+    const data = loadPasskeys();
+    if (!data.passkeys || data.passkeys.length === 0) {
+        sendJson(res, { error: 'No passkeys registered' }, 400);
         return true;
     }
+
+    const { rpID, origin } = getRpConfig(req);
+
+    try {
+        const options = await simplewebauthn.generateAuthenticationOptions({
+            rpID,
+            allowCredentials: data.passkeys.map(pk => ({
+                id: pk.credentialID,
+                type: 'public-key',
+                transports: pk.transports || [],
+            })),
+            userVerification: 'required',
+        });
+
+        // Store challenge for verification
+        pendingChallenges.set('direct_auth', { challenge: options.challenge, created: Date.now() });
+        sendJson(res, options);
+    } catch (e) {
+        console.error('[AUTH] Passkey options error:', e);
+        sendJson(res, { error: e.message }, 500);
+    }
+    return true;
+}
+
+async function handlePasskeyVerify(req, res) {
+    const body = await readBody(req);
+    const payload = JSON.parse(body.toString('utf-8'));
+    const data = loadPasskeys();
+
+    const challengeEntry = pendingChallenges.get('direct_auth');
+    if (!challengeEntry) {
+        sendJson(res, { error: 'No pending challenge' }, 400);
+        return true;
+    }
+
+    const { rpID, origin } = getRpConfig(req);
+    const passkey = (data.passkeys || []).find(pk => pk.credentialID === payload.id);
+    if (!passkey) {
+        sendJson(res, { error: 'Passkey not found' }, 400);
+        return true;
+    }
+
+    try {
+        const verification = await simplewebauthn.verifyAuthenticationResponse({
+            response: payload,
+            expectedChallenge: challengeEntry.challenge,
+            expectedOrigin: origin,
+            expectedRPID: rpID,
+            credential: {
+                id: passkey.credentialID,
+                publicKey: Buffer.from(passkey.credentialPublicKey, 'base64'),
+                counter: passkey.counter,
+                transports: passkey.transports || [],
+            },
+        });
+
+        if (!verification.verified) {
+            sendJson(res, { error: 'Verification failed' }, 401);
+            return true;
+        }
+
+        passkey.counter = verification.authenticationInfo.newCounter;
+        savePasskeys(data);
+        pendingChallenges.delete('direct_auth');
+
+        const sessionId = createSession(req);
+        setSessionCookie(res, sessionId, req);
+        logAudit('login_passkey_direct', { ip: req.socket.remoteAddress });
+
+        sendJson(res, { ok: true });
+    } catch (e) {
+        console.error('[AUTH] Passkey verify error:', e);
+        logAudit('login_failed', { ip: req.socket.remoteAddress, error: e.message });
+        sendJson(res, { error: e.message }, 500);
+    }
+    return true;
+}
+
+function serveRegisterPage(req, res) {
     res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
     res.end(REGISTER_HTML);
     return true;
 }
 
 async function handleRegisterStart(req, res) {
-    if (hasPasskeys()) {
-        sendJson(res, { error: 'Passkeys already registered' }, 403);
+    if (!pendingRegistration) {
+        sendJson(res, { error: 'Complete the profile form first' }, 400);
         return true;
     }
 
     const rpConfig = getRpConfig(req);
     const { rpID, rpName } = rpConfig;
-    console.log(`[AUTH REGISTER] rpID=${rpID} origin=${rpConfig.origin}`);
+    console.log(`[AUTH REGISTER] rpID=${rpID} origin=${rpConfig.origin} user=${pendingRegistration.username}`);
     const data = loadPasskeys();
     const existingCreds = (data.passkeys || []).map(pk => ({
         id: pk.credentialID,
@@ -659,8 +1008,8 @@ async function handleRegisterStart(req, res) {
         const options = await simplewebauthn.generateRegistrationOptions({
             rpName,
             rpID,
-            userName: 'tterm-admin',
-            userDisplayName: 'T-Term Admin',
+            userName: pendingRegistration.username,
+            userDisplayName: pendingRegistration.displayName || pendingRegistration.username,
             attestationType: 'none',
             excludeCredentials: existingCreds,
             authenticatorSelection: {
@@ -679,10 +1028,6 @@ async function handleRegisterStart(req, res) {
 }
 
 async function handleRegisterFinish(req, res) {
-    if (hasPasskeys()) {
-        sendJson(res, { error: 'Passkeys already registered' }, 403);
-        return true;
-    }
 
     const body = await readBody(req);
     let credential;
@@ -712,6 +1057,10 @@ async function handleRegisterFinish(req, res) {
 
         const data = loadPasskeys();
         data.passkeys = data.passkeys || [];
+        const ua = req.headers['user-agent'] || '';
+        const devInfo = parseDeviceInfo(ua);
+        const ip = (req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+
         data.passkeys.push({
             credentialID: cred.id,
             credentialPublicKey: Buffer.from(cred.publicKey).toString('base64'),
@@ -720,6 +1069,11 @@ async function handleRegisterFinish(req, res) {
             deviceType: credentialDeviceType,
             backedUp: credentialBackedUp,
             registeredAt: new Date().toISOString(),
+            browser: devInfo.browser,
+            os: devInfo.os,
+            device: devInfo.device,
+            ip: ip,
+            userAgent: ua,
         });
 
         // Generate backup codes (XXXX-XXXX format)
@@ -735,6 +1089,23 @@ async function handleRegisterFinish(req, res) {
         }));
         data.registeredAt = new Date().toISOString();
 
+        // Link passkey to user profile
+        if (pendingRegistration) {
+            data.passkeys[data.passkeys.length - 1].username = pendingRegistration.username;
+            // Save user profile
+            const users = loadUsers();
+            users.push({
+                username: pendingRegistration.username,
+                displayName: pendingRegistration.displayName || '',
+                email: pendingRegistration.email || '',
+                role: users.length === 0 ? 'admin' : 'user',
+                credentialID: cred.id,
+                registeredAt: new Date().toISOString(),
+                ip: req.socket.remoteAddress,
+            });
+            saveUsers(users);
+        }
+
         savePasskeys(data);
         registrationChallenge = null;
 
@@ -742,6 +1113,12 @@ async function handleRegisterFinish(req, res) {
         const sessionId = createSession(req);
         setSessionCookie(res, sessionId, req);
 
+        logAudit('register', {
+            ip: req.socket.remoteAddress,
+            username: pendingRegistration?.username,
+            deviceType: credentialDeviceType,
+        });
+        pendingRegistration = null;
         sendJson(res, { verified: true, backupCodes });
     } catch (e) {
         console.error('[AUTH] Register finish error:', e);
@@ -752,7 +1129,7 @@ async function handleRegisterFinish(req, res) {
 
 function handleLogout(req, res) {
     const sessionId = getSessionFromCookie(req);
-    if (sessionId) activeSessions.delete(sessionId);
+    if (sessionId) { activeSessions.delete(sessionId); saveSessionsToFile(); }
     clearSessionCookie(res);
     res.writeHead(302, { Location: '/login' });
     res.end();
@@ -832,7 +1209,7 @@ body::after {
 .logo {
     font-family: 'Rajdhani', sans-serif; font-size: 48px; font-weight: 700;
     letter-spacing: 12px; text-transform: uppercase;
-    background: linear-gradient(135deg, #38bdf8 0%, #818cf8 50%, #c084fc 100%);
+    background: linear-gradient(135deg, #38bdf8 0%, #0284c7 100%);
     -webkit-background-clip: text; -webkit-text-fill-color: transparent;
     background-clip: text;
     margin-bottom: 4px;
@@ -874,8 +1251,8 @@ body::after {
 }
 .orb { position: absolute; border-radius: 50%; filter: blur(100px); opacity: 0.08; z-index: 0; }
 .orb1 { width: 400px; height: 400px; background: #38bdf8; top: -150px; left: -150px; }
-.orb2 { width: 300px; height: 300px; background: #c084fc; bottom: -100px; right: -100px; }
-.orb3 { width: 200px; height: 200px; background: #818cf8; top: 50%; left: 60%; }
+.orb2 { width: 300px; height: 300px; background: #0284c7; bottom: -100px; right: -100px; }
+.orb3 { width: 200px; height: 200px; background: #38bdf8; top: 50%; left: 60%; }
 .hud { position: fixed; width: 28px; height: 28px; z-index: 2; pointer-events: none; opacity: 0.15; }
 .hud::before, .hud::after { content: ''; position: absolute; background: #38bdf8; }
 .hud-tl { top: 10px; left: 10px; } .hud-tl::before { width: 18px; height: 1px; } .hud-tl::after { width: 1px; height: 18px; }
@@ -883,6 +1260,16 @@ body::after {
 .hud-bl { bottom: 10px; left: 10px; } .hud-bl::before { width: 18px; height: 1px; bottom: 0; } .hud-bl::after { width: 1px; height: 18px; bottom: 0; }
 .hud-br { bottom: 10px; right: 10px; } .hud-br::before { width: 18px; height: 1px; right: 0; bottom: 0; } .hud-br::after { width: 1px; height: 18px; right: 0; bottom: 0; }
 .divider { border: none; border-top: 1px solid rgba(255,255,255,0.06); margin: 24px 0; }
+.btn-passkey {
+    display: block; width: 100%; padding: 14px; border-radius: 10px; border: none;
+    background: linear-gradient(135deg, #0284c7, #38bdf8);
+    color: white; font-family: 'Rajdhani', sans-serif; font-size: 16px;
+    font-weight: 700; cursor: pointer; letter-spacing: 2px; text-transform: uppercase;
+    transition: all 0.3s; margin-bottom: 16px;
+}
+.btn-passkey:hover { box-shadow: 0 4px 20px rgba(2,132,199,0.3); }
+.btn-passkey:active { transform: scale(0.97); }
+.btn-passkey:disabled { opacity: 0.5; cursor: not-allowed; }
 .backup-link {
     font-family: 'Share Tech Mono', monospace; font-size: 10px; letter-spacing: 1px;
     color: #475569; cursor: pointer; text-decoration: none; text-transform: uppercase;
@@ -927,6 +1314,7 @@ body::after {
         <div class="status waiting" id="status">Waiting for approval...</div>
     </div>
     <hr class="divider">
+    <button class="btn-passkey" onclick="signInWithPasskey()">Sign in with Passkey</button>
     <a class="backup-link" id="backup-toggle" onclick="toggleBackup()">Use backup code instead</a>
     <div id="backup-section">
         <input class="backup-input" id="backup-code" placeholder="XXXX-XXXX" maxlength="9">
@@ -1016,7 +1404,46 @@ async function submitBackup() {
 document.getElementById('backup-code').addEventListener('keydown', e => {
     if (e.key === 'Enter') submitBackup();
 });
+
+async function signInWithPasskey() {
+    const btn = document.querySelector('.btn-passkey');
+    btn.disabled = true;
+    btn.textContent = 'Authenticating...';
+    polling = false;
+
+    try {
+        const optResp = await fetch('/auth/passkey-options', { method: 'POST' });
+        const options = await optResp.json();
+        if (options.error) { showError(options.error); btn.disabled = false; btn.textContent = 'Sign in with Passkey'; polling = true; return; }
+
+        const credential = await SimpleWebAuthnBrowser.startAuthentication({ optionsJSON: options });
+
+        const verResp = await fetch('/auth/passkey-verify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(credential),
+        });
+        const result = await verResp.json();
+
+        if (result.ok) {
+            btn.textContent = 'Success!';
+            btn.style.background = 'linear-gradient(135deg, #059669, #22c55e)';
+            setTimeout(() => { window.location.href = '/'; }, 500);
+        } else {
+            showError(result.error || 'Authentication failed');
+            btn.disabled = false;
+            btn.textContent = 'Sign in with Passkey';
+            polling = true;
+        }
+    } catch (e) {
+        showError(e.message || 'Authentication cancelled');
+        btn.disabled = false;
+        btn.textContent = 'Sign in with Passkey';
+        polling = true;
+    }
+}
 </script>
+<script src="https://unpkg.com/@simplewebauthn/browser/dist/bundle/index.umd.min.js"></script>
 </body>
 </html>`;
 }
@@ -1066,7 +1493,7 @@ body::before {
 .logo {
     font-family: 'Rajdhani', sans-serif; font-size: 28px; font-weight: 700;
     letter-spacing: 6px; text-transform: uppercase;
-    background: linear-gradient(135deg, #38bdf8, #818cf8, #c084fc);
+    background: linear-gradient(135deg, #38bdf8, #0284c7);
     -webkit-background-clip: text; -webkit-text-fill-color: transparent;
 }
 .subtitle {
@@ -1217,7 +1644,7 @@ body::before {
 }
 .orb { position: absolute; border-radius: 50%; filter: blur(100px); opacity: 0.08; z-index: 0; }
 .orb1 { width: 300px; height: 300px; background: #38bdf8; top: -100px; left: -80px; }
-.orb2 { width: 200px; height: 200px; background: #c084fc; bottom: -60px; right: -40px; }
+.orb2 { width: 200px; height: 200px; background: #0284c7; bottom: -60px; right: -40px; }
 .container {
     text-align: center; padding: 44px 36px;
     background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06);
@@ -1229,7 +1656,7 @@ body::before {
 .logo {
     font-family: 'Rajdhani', sans-serif; font-size: 32px; font-weight: 700;
     letter-spacing: 8px; text-transform: uppercase;
-    background: linear-gradient(135deg, #38bdf8, #818cf8, #c084fc);
+    background: linear-gradient(135deg, #38bdf8, #0284c7);
     -webkit-background-clip: text; -webkit-text-fill-color: transparent;
     margin-bottom: 4px;
 }
@@ -1364,9 +1791,13 @@ body {
     background: linear-gradient(135deg, #0a0a0f 0%, #0d1117 30%, #0a0f1a 60%, #0a0a0f 100%);
     font-family: 'Segoe UI', Arial, sans-serif; color: #e6edf3;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
-    position: relative; overflow: hidden;
+    position: relative; overflow-x: hidden; overflow-y: auto;
+    padding: 40px 20px;
 }
-html { overflow: hidden; max-width: 100vw; }
+html { max-width: 100vw; }
+@media (max-width: 500px) {
+    body { justify-content: flex-start; padding-top: 60px; }
+}
 body::before {
     content: ''; position: fixed; inset: 0;
     background-image: linear-gradient(rgba(56,189,248,0.03) 1px, transparent 1px),
@@ -1484,6 +1915,13 @@ body::after {
 }
 @keyframes pop { from { transform: scale(0); } to { transform: scale(1); } }
 .success-icon svg { width: 32px; height: 32px; color: #22c55e; }
+.step-user {
+    font-family: 'Share Tech Mono', monospace; font-size: 11px;
+    color: #38bdf8; letter-spacing: 1px; margin-bottom: 20px;
+    padding: 8px 16px; background: rgba(56,189,248,0.06);
+    border: 1px solid rgba(56,189,248,0.15); border-radius: 8px;
+    display: inline-block;
+}
 </style>
 </head>
 <body>
@@ -1493,21 +1931,50 @@ body::after {
 <div class="orb orb2"></div>
 <div class="container">
     <div class="logo">T-TERM</div>
-    <div class="subtitle">First-time Setup</div>
+    <div class="subtitle">Create Account</div>
 
-    <div id="register-section">
+    <!-- Step 1: Profile -->
+    <div id="step-profile">
+        <div class="icon-shield">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                <circle cx="12" cy="7" r="4"/>
+            </svg>
+        </div>
+        <div class="description">
+            Set up your account to access T-Term. You'll register a passkey in the next step.
+        </div>
+        <div class="form-group">
+            <label class="form-label">Username *</label>
+            <input class="form-input" id="reg-username" placeholder="Choose a username" autocomplete="off" autofocus>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Display Name</label>
+            <input class="form-input" id="reg-displayname" placeholder="Your name (optional)">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Email</label>
+            <input class="form-input" id="reg-email" type="email" placeholder="Email (optional)">
+        </div>
+        <button class="btn" id="btn-profile" onclick="submitProfile()">Continue</button>
+    </div>
+
+    <!-- Step 2: Passkey -->
+    <div id="step-passkey" style="display:none">
         <div class="icon-shield">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
             </svg>
         </div>
         <div class="description">
-            Register a passkey to secure your terminal. This uses your device's
-            built-in biometrics (Face ID, fingerprint, or PIN).
+            Now register a passkey using your device's biometrics
+            (Face ID, fingerprint, or PIN). This will be used to approve future logins.
         </div>
-        <button class="btn" id="btn-register" onclick="registerDevice()">Register Device</button>
+        <div class="step-user" id="step-user"></div>
+        <button class="btn" id="btn-register" onclick="registerDevice()">Register Passkey</button>
     </div>
 
+    <!-- Step 3: Backup codes -->
     <div class="backup-codes" id="backup-codes">
         <div class="success-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1528,6 +1995,46 @@ body::after {
 <script>
 const { startRegistration } = SimpleWebAuthnBrowser;
 
+// Step 1: Submit profile
+async function submitProfile() {
+    const username = document.getElementById('reg-username').value.trim();
+    const displayName = document.getElementById('reg-displayname').value.trim();
+    const email = document.getElementById('reg-email').value.trim();
+
+    if (!username || username.length < 2) {
+        showError('Username is required (min 2 characters)');
+        return;
+    }
+
+    const btn = document.getElementById('btn-profile');
+    btn.disabled = true;
+    btn.textContent = 'Saving...';
+
+    try {
+        const resp = await fetch('/register/profile', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, displayName, email }),
+        });
+        const result = await resp.json();
+        if (result.error) {
+            showError(result.error);
+            btn.disabled = false;
+            btn.textContent = 'Continue';
+            return;
+        }
+        // Move to step 2
+        document.getElementById('step-profile').style.display = 'none';
+        document.getElementById('step-passkey').style.display = 'block';
+        document.getElementById('step-user').textContent = 'Account: ' + username;
+    } catch (e) {
+        showError(e.message);
+        btn.disabled = false;
+        btn.textContent = 'Continue';
+    }
+}
+
+// Step 2: Register passkey
 async function registerDevice() {
     const btn = document.getElementById('btn-register');
     btn.disabled = true;
@@ -1551,7 +2058,7 @@ async function registerDevice() {
 
         if (result.verified) {
             showStatus('');
-            document.getElementById('register-section').style.display = 'none';
+            document.getElementById('step-passkey').style.display = 'none';
             const codeGrid = document.getElementById('code-grid');
             for (const code of result.backupCodes) {
                 const span = document.createElement('span');
@@ -1569,7 +2076,12 @@ async function registerDevice() {
     }
 }
 
-// Enter key triggers registration
+// Enter key on profile form
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && document.getElementById('step-profile').style.display !== 'none') {
+        submitProfile();
+    }
+});
 
 function showError(msg) {
     const el = document.getElementById('error');
@@ -1584,6 +2096,368 @@ function showStatus(msg) {
 </script>
 </body>
 </html>`;
+
+// ---------------------------------------------------------------------------
+//  Admin Page HTML
+// ---------------------------------------------------------------------------
+
+function adminPageHTML() {
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>T-TERM — Admin</title>
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    min-height: 100vh;
+    background: linear-gradient(135deg, #0a0a0f 0%, #0d1117 30%, #0a0f1a 60%, #0a0a0f 100%);
+    font-family: 'Segoe UI', Arial, sans-serif; color: #e6edf3;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 40px 20px; position: relative;
+}
+body::before {
+    content: ''; position: fixed; inset: 0;
+    background-image: linear-gradient(rgba(56,189,248,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(56,189,248,0.03) 1px, transparent 1px);
+    background-size: 60px 60px; z-index: 0; pointer-events: none;
+}
+.container { position: relative; z-index: 1; max-width: 700px; width: 100%; }
+.header { display: flex; align-items: center; gap: 16px; margin-bottom: 32px; }
+.logo {
+    font-family: 'Rajdhani', sans-serif; font-size: 28px; font-weight: 700;
+    letter-spacing: 6px; text-transform: uppercase;
+    background: linear-gradient(135deg, #38bdf8, #0284c7);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+}
+.subtitle {
+    font-family: 'Share Tech Mono', monospace; font-size: 10px;
+    letter-spacing: 3px; color: #475569; text-transform: uppercase;
+}
+.back-btn {
+    margin-left: auto; font-family: 'Share Tech Mono', monospace; font-size: 10px;
+    letter-spacing: 1px; color: #475569; text-decoration: none;
+    border: 1px solid rgba(255,255,255,0.06); padding: 6px 14px;
+    border-radius: 6px; background: rgba(255,255,255,0.03); cursor: pointer;
+    transition: all 0.15s; text-transform: uppercase;
+}
+.back-btn:hover { border-color: rgba(56,189,248,0.3); color: #38bdf8; }
+
+/* Tabs */
+.tabs { display: flex; gap: 2px; margin-bottom: 24px; }
+.tab {
+    font-family: 'Share Tech Mono', monospace; font-size: 11px;
+    letter-spacing: 1.5px; color: #475569; text-transform: uppercase;
+    padding: 10px 20px; cursor: pointer; transition: all 0.15s;
+    background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04);
+    border-radius: 8px 8px 0 0; border-bottom: none;
+}
+.tab:hover { color: #94a3b8; }
+.tab.active {
+    color: #38bdf8; background: rgba(56,189,248,0.05);
+    border-color: rgba(56,189,248,0.15); border-bottom: none;
+    position: relative;
+}
+.tab.active::after {
+    content: ''; position: absolute; bottom: -1px; left: 0; right: 0;
+    height: 2px; background: linear-gradient(90deg, #38bdf8, #0284c7);
+}
+.panel { display: none; }
+.panel.active { display: block; }
+
+/* Cards */
+.card {
+    background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 12px; padding: 14px 18px; margin-bottom: 8px;
+    display: flex; align-items: center; gap: 14px;
+    transition: all 0.15s; animation: cardIn 0.3s ease both;
+}
+@keyframes cardIn { from { opacity: 0; transform: translateY(8px); } }
+.card:hover { border-color: rgba(255,255,255,0.1); }
+.dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.dot-blue { background: #38bdf8; box-shadow: 0 0 6px rgba(56,189,248,0.5); }
+.dot-green { background: #22c55e; box-shadow: 0 0 6px rgba(34,197,94,0.5); }
+.dot-red { background: #ef4444; box-shadow: 0 0 6px rgba(239,68,68,0.5); }
+.dot-amber { background: #f59e0b; box-shadow: 0 0 6px rgba(245,158,11,0.5); }
+.card-info { flex: 1; min-width: 0; }
+.card-label {
+    font-family: 'Share Tech Mono', monospace; font-size: 12px;
+    color: #e6edf3; letter-spacing: 0.5px; margin-bottom: 3px;
+}
+.card-meta {
+    font-family: 'Share Tech Mono', monospace; font-size: 10px;
+    color: #475569; display: flex; gap: 10px; flex-wrap: wrap;
+}
+.tag {
+    font-family: 'Share Tech Mono', monospace; font-size: 9px;
+    padding: 2px 8px; border-radius: 4px; letter-spacing: 0.5px;
+}
+.tag-blue { background: rgba(56,189,248,0.1); color: #38bdf8; border: 1px solid rgba(56,189,248,0.2); }
+.tag-green { background: rgba(34,197,94,0.1); color: #22c55e; border: 1px solid rgba(34,197,94,0.2); }
+.tag-red { background: rgba(239,68,68,0.1); color: #ef4444; border: 1px solid rgba(239,68,68,0.2); }
+.tag-amber { background: rgba(245,158,11,0.1); color: #f59e0b; border: 1px solid rgba(245,158,11,0.2); }
+
+/* Buttons */
+.btn-danger {
+    font-family: 'Share Tech Mono', monospace; font-size: 9px;
+    padding: 4px 12px; border-radius: 4px; letter-spacing: 1px;
+    border: 1px solid rgba(239,68,68,0.3); background: none;
+    color: #ef4444; cursor: pointer; text-transform: uppercase;
+    transition: all 0.15s; opacity: 0;
+}
+.card:hover .btn-danger { opacity: 1; }
+.btn-danger:hover { background: rgba(239,68,68,0.1); border-color: #ef4444; }
+.btn-action {
+    font-family: 'Share Tech Mono', monospace; font-size: 10px;
+    padding: 8px 20px; border-radius: 6px; letter-spacing: 1px;
+    border: 1px solid rgba(56,189,248,0.3); background: rgba(56,189,248,0.05);
+    color: #38bdf8; cursor: pointer; text-transform: uppercase;
+    transition: all 0.15s; white-space: nowrap; flex-shrink: 0;
+}
+.btn-action:hover { background: rgba(56,189,248,0.15); border-color: #38bdf8; }
+.section-title {
+    font-family: 'Share Tech Mono', monospace; font-size: 10px;
+    color: #475569; letter-spacing: 1px; margin-bottom: 12px;
+    text-transform: uppercase;
+}
+.empty {
+    text-align: center; padding: 32px;
+    font-family: 'Share Tech Mono', monospace; font-size: 11px;
+    color: #475569; letter-spacing: 1px;
+}
+.label-input {
+    background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
+    color: #e6edf3; padding: 4px 8px; border-radius: 4px;
+    font-family: 'Share Tech Mono', monospace; font-size: 11px;
+    width: 140px; outline: none;
+}
+.label-input:focus { border-color: rgba(56,189,248,0.4); }
+
+/* Whitelist form */
+.wl-form {
+    display: flex; gap: 8px; margin-bottom: 16px; align-items: center;
+}
+.wl-input {
+    flex: 1; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
+    color: #e6edf3; padding: 8px 14px; border-radius: 6px;
+    font-family: 'Share Tech Mono', monospace; font-size: 11px; outline: none;
+}
+.wl-input:focus { border-color: rgba(56,189,248,0.4); }
+.wl-input::placeholder { color: #475569; }
+</style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <div>
+            <div class="logo">T-TERM</div>
+            <div class="subtitle">Administration</div>
+        </div>
+        <a class="back-btn" href="/">Back to terminal</a>
+    </div>
+
+    <div class="tabs">
+        <div class="tab active" onclick="switchTab('sessions')">Sessions</div>
+        <div class="tab" onclick="switchTab('devices')">Devices</div>
+        <div class="tab" onclick="switchTab('whitelist')">Trusted</div>
+        <div class="tab" onclick="switchTab('audit')">Audit Log</div>
+    </div>
+
+    <!-- Sessions Panel -->
+    <div class="panel active" id="panel-sessions">
+        <div class="section-title" id="sessions-count"></div>
+        <div id="sessions-list"></div>
+    </div>
+
+    <!-- Devices Panel -->
+    <div class="panel" id="panel-devices">
+        <div class="section-title" id="devices-count"></div>
+        <div id="devices-list"></div>
+    </div>
+
+    <!-- Whitelist Panel -->
+    <div class="panel" id="panel-whitelist">
+        <div class="wl-form">
+            <input class="wl-input" id="wl-label" placeholder="Device label (e.g. Dev Machine)">
+            <button class="btn-action" onclick="whitelistThis()">Trust This Device</button>
+        </div>
+        <div class="section-title" id="whitelist-count"></div>
+        <div id="whitelist-list"></div>
+    </div>
+
+    <!-- Audit Panel -->
+    <div class="panel" id="panel-audit">
+        <div class="section-title" id="audit-count"></div>
+        <div id="audit-list"></div>
+    </div>
+</div>
+
+<script>
+function switchTab(name) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    document.querySelector('.tab[onclick*="' + name + '"]').classList.add('active');
+    document.getElementById('panel-' + name).classList.add('active');
+}
+
+// Sessions
+async function loadSessions() {
+    const resp = await fetch('/auth/sessions-list');
+    const sessions = await resp.json();
+    const el = document.getElementById('sessions-list');
+    document.getElementById('sessions-count').textContent = sessions.length + ' active session' + (sessions.length !== 1 ? 's' : '');
+    if (sessions.length === 0) { el.innerHTML = '<div class="empty">No active sessions</div>'; return; }
+    el.innerHTML = sessions.map((s, i) => {
+        const remaining = Math.max(0, Math.round((s.expires - Date.now()) / 60000));
+        const hours = Math.floor(remaining / 60), mins = remaining % 60;
+        const timeLeft = hours > 0 ? hours + 'h ' + mins + 'm' : mins + 'm';
+        const machine = s.machine ? '<strong style="color:#38bdf8">' + s.machine + '</strong> · ' : '';
+        return '<div class="card" style="animation-delay:' + (i * 0.04) + 's">' +
+            '<div class="dot ' + (s.isCurrent ? 'dot-blue' : 'dot-green') + '"></div>' +
+            '<div class="card-info">' +
+                '<div class="card-label">' + machine + s.browser + ' on ' + s.os +
+                    (s.isCurrent ? ' <span class="tag tag-blue">THIS DEVICE</span>' : '') + '</div>' +
+                '<div class="card-meta"><span>' + s.ip + '</span><span>' + s.id + '</span><span>' + timeLeft + ' left</span></div>' +
+                (s.screen || s.gpu ? '<div class="card-meta">' + (s.screen ? '<span>' + s.screen + '</span>' : '') + (s.gpu ? '<span>' + s.gpu.substring(0,40) + '</span>' : '') + '</div>' : '') +
+            '</div>' +
+            (s.isCurrent ? '' : '<button class="btn-danger" onclick="killSession(\\'' + s.fullId + '\\', this)">Revoke</button>') +
+        '</div>';
+    }).join('');
+}
+
+async function killSession(id, btn) {
+    btn.textContent = '...';
+    await fetch('/auth/kill-session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: id }) });
+    loadSessions();
+}
+
+// Devices
+async function loadDevices() {
+    const resp = await fetch('/admin/devices');
+    const devices = await resp.json();
+    const el = document.getElementById('devices-list');
+    document.getElementById('devices-count').textContent = devices.length + ' registered device' + (devices.length !== 1 ? 's' : '');
+    if (devices.length === 0) { el.innerHTML = '<div class="empty">No devices registered</div>'; return; }
+    el.innerHTML = devices.map((d, i) => {
+        const name = d.displayName || d.username || 'Unknown';
+        const roleTag = d.role === 'admin' ? '<span class="tag tag-amber">ADMIN</span>' : '<span class="tag tag-blue">USER</span>';
+        const deviceLabel = [d.device, d.browser, d.os].filter(Boolean).join(' · ') || d.deviceType;
+        return '<div class="card" style="animation-delay:' + (i * 0.04) + 's">' +
+            '<div class="dot dot-blue"></div>' +
+            '<div class="card-info">' +
+                '<div class="card-label">' + name + ' ' + roleTag +
+                    (d.username ? ' <span style="color:#475569;font-size:10px">@' + d.username + '</span>' : '') + '</div>' +
+                '<div class="card-meta">' +
+                    '<span>' + deviceLabel + '</span>' +
+                    (d.backedUp ? '<span class="tag tag-green">BACKED UP</span>' : '') +
+                '</div>' +
+                '<div class="card-meta">' +
+                    (d.email ? '<span>' + d.email + '</span>' : '') +
+                    (d.ip ? '<span>' + d.ip + '</span>' : '') +
+                    '<span>' + new Date(d.registeredAt).toLocaleDateString() + '</span>' +
+                '</div>' +
+            '</div>' +
+            '<button class="btn-danger" onclick="removeDevice(' + d.index + ', this)">Remove</button>' +
+        '</div>';
+    }).join('');
+}
+
+async function labelDevice(index, label) {
+    await fetch('/admin/label-device', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ index, label }) });
+}
+
+async function removeDevice(index, btn) {
+    if (!confirm('Remove this device? It will no longer be able to approve logins.')) return;
+    btn.textContent = '...';
+    await fetch('/admin/remove-device', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ index }) });
+    loadDevices();
+}
+
+// Whitelist
+async function loadWhitelist() {
+    const resp = await fetch('/admin/whitelist');
+    const list = await resp.json();
+    const el = document.getElementById('whitelist-list');
+    document.getElementById('whitelist-count').textContent = list.length + ' trusted device' + (list.length !== 1 ? 's' : '');
+    if (list.length === 0) { el.innerHTML = '<div class="empty">No trusted devices — these skip authentication entirely</div>'; return; }
+    el.innerHTML = list.map((d, i) => {
+        return '<div class="card" style="animation-delay:' + (i * 0.04) + 's">' +
+            '<div class="dot dot-green"></div>' +
+            '<div class="card-info">' +
+                '<div class="card-label">' + d.label + '</div>' +
+                '<div class="card-meta"><span>' + d.ip + '</span><span>Added: ' + new Date(d.created).toLocaleDateString() + '</span></div>' +
+            '</div>' +
+            '<button class="btn-danger" onclick="removeWhitelist(' + i + ', this)">Remove</button>' +
+        '</div>';
+    }).join('');
+}
+
+async function whitelistThis() {
+    const label = document.getElementById('wl-label').value.trim() || 'Unnamed device';
+    await fetch('/admin/whitelist-add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ label }) });
+    document.getElementById('wl-label').value = '';
+    loadWhitelist();
+}
+
+async function removeWhitelist(index, btn) {
+    if (!confirm('Remove this device from trusted list?')) return;
+    btn.textContent = '...';
+    await fetch('/admin/whitelist-remove', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ index }) });
+    loadWhitelist();
+}
+
+// Audit
+async function loadAudit() {
+    const resp = await fetch('/admin/audit');
+    const log = await resp.json();
+    const el = document.getElementById('audit-list');
+    document.getElementById('audit-count').textContent = log.length + ' event' + (log.length !== 1 ? 's' : '');
+    if (log.length === 0) { el.innerHTML = '<div class="empty">No events recorded</div>'; return; }
+
+    const eventColors = {
+        login_passkey: 'green', login_backup: 'amber', login_failed: 'red',
+        register: 'blue', device_removed: 'red',
+        whitelist_add: 'green', whitelist_remove: 'amber',
+    };
+    const eventLabels = {
+        login_passkey: 'Login (Passkey)', login_backup: 'Login (Backup Code)', login_failed: 'Login Failed',
+        register: 'Device Registered', device_removed: 'Device Removed',
+        whitelist_add: 'Device Trusted', whitelist_remove: 'Trust Removed',
+    };
+
+    el.innerHTML = log.map((e, i) => {
+        const color = eventColors[e.event] || 'blue';
+        const label = eventLabels[e.event] || e.event;
+        const dt = new Date(e.time);
+        const date = dt.toLocaleDateString();
+        const time = dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const details = [];
+        if (e.ip) details.push(e.ip);
+        if (e.error) details.push(e.error);
+        if (e.deviceType) details.push(e.deviceType);
+        if (e.label) details.push(e.label);
+        return '<div class="card" style="animation-delay:' + (Math.min(i, 20) * 0.03) + 's">' +
+            '<div class="dot dot-' + color + '"></div>' +
+            '<div class="card-info">' +
+                '<div class="card-label">' + label + ' <span class="tag tag-' + color + '">' + e.event.toUpperCase() + '</span></div>' +
+                '<div class="card-meta"><span>' + date + ' ' + time + '</span>' + details.map(d => '<span>' + d + '</span>').join('') + '</div>' +
+            '</div>' +
+        '</div>';
+    }).join('');
+}
+
+// Init
+loadSessions();
+loadDevices();
+loadWhitelist();
+loadAudit();
+setInterval(loadSessions, 10000);
+</script>
+</body>
+</html>`;
+}
 
 // ---------------------------------------------------------------------------
 //  Exports

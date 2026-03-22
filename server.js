@@ -712,7 +712,7 @@ function handleApiSessions(req, res) {
         const mtime = fs.statSync(fpath).mtimeMs / 1000;
         const dt = new Date(mtime * 1000);
 
-        // Get first user message as preview
+        // Get first real user message as preview (skip system tags)
         let preview = '';
         try {
             const content = fs.readFileSync(fpath, 'utf-8');
@@ -721,18 +721,24 @@ function handleApiSessions(req, res) {
                 try {
                     const obj = JSON.parse(line);
                     if (obj.type === 'user') {
+                        let text = '';
                         const msgContent = obj.message?.content || '';
                         if (Array.isArray(msgContent)) {
                             for (const c of msgContent) {
                                 if (c && typeof c === 'object' && c.type === 'text') {
-                                    preview = c.text.slice(0, 100).replace(/\n/g, ' ');
+                                    text = c.text;
                                     break;
                                 }
                             }
                         } else if (typeof msgContent === 'string') {
-                            preview = msgContent.slice(0, 100).replace(/\n/g, ' ');
+                            text = msgContent;
                         }
-                        if (preview) break;
+                        // Strip XML-like tags and trim
+                        text = text.replace(/<[^>]+>/g, '').trim();
+                        if (text.length > 2) {
+                            preview = text.slice(0, 100).replace(/\n/g, ' ');
+                            break;
+                        }
                     }
                 } catch (e) { /* skip malformed lines */ }
             }
@@ -1068,7 +1074,7 @@ async function requestHandler(req, res) {
     }
 
     // Auth routes are always accessible
-    const authPaths = ['/auth/', '/login', '/approve', '/do-approve', '/check', '/register'];
+    const authPaths = ['/auth/', '/login', '/approve', '/do-approve', '/check', '/register', '/admin'];
     if (authPaths.some(p => pathname === p || pathname.startsWith(p + '/') || pathname.startsWith(p + '?')) || pathname.startsWith('/auth/')) {
         const handled = await handleAuthRoute(req, res, pathname);
         if (handled) return;
@@ -1122,6 +1128,16 @@ async function requestHandler(req, res) {
                 existing.push(media);
                 fs.writeFileSync(mediaFile, JSON.stringify(existing, null, 2));
                 sendJson(res, { ok: true });
+            } catch(e) { sendJson(res, { error: e.message }, 500); }
+        } else if (req.method === 'DELETE' && pathname === '/api/chat-media') {
+            const body = await readBody(req);
+            const { name, ts } = JSON.parse(body.toString('utf-8'));
+            const mediaFile = path.join(PROJECTS_DIR, name, '.tterm_media.json');
+            try {
+                const existing = fs.existsSync(mediaFile) ? JSON.parse(fs.readFileSync(mediaFile, 'utf-8')) : [];
+                const filtered = existing.filter(m => m.ts !== ts);
+                fs.writeFileSync(mediaFile, JSON.stringify(filtered, null, 2));
+                sendJson(res, { ok: true, removed: existing.length - filtered.length });
             } catch(e) { sendJson(res, { error: e.message }, 500); }
         } else if (req.method === 'GET' && pathname === '/api/stars') {
             // Get starred messages for a project
