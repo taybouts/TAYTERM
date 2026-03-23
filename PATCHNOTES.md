@@ -1,4 +1,55 @@
-# TAYTERM Patch Notes
+# T-Term Patch Notes
+
+## v0.5.0 — Session Browser, Auth System & Mobile PWA
+_Released: 2026-03-23_
+
+### New Features
+- **Authentication system** — WebAuthn/Passkeys with QR login, Face ID, device whitelist, backup codes
+- **Admin panel** (`/admin`) — Sessions, Devices, Trusted, Audit Log tabs
+- **Mobile PWA** — edge-to-edge iPhone 17 Pro Max support, photo picker, voice input, real-time sync
+- **Side tray** — hover-triggered panel with Flags, Search, Gallery, Sessions, Notes
+- **Session browser** — browse all JSONL sessions per project, click to preview, resume/delete/favorite
+- **Notes panel** — per-project or general notes, stored server-side
+- **Drag and drop tabs** — reorder tabs by dragging, order persisted to localStorage
+- **Custom glass modals** — frosted glass confirmation dialogs replacing browser popups
+- **Scroll lock-to-bottom** — follows chat when at bottom, preserves position when scrolled up
+- **Stats bar** — context usage, tokens, images, model info with pull-up panel
+- **Screenshot & image system** — paste, drag & drop, camera roll, inline bubbles with delete
+- **Split view** — messenger + terminal side by side
+- **Multi-pane layouts** — single, hsplit, vsplit, triple, quad
+
+### Improvements
+- **DOM cache invalidation** — stale panes detected by message count, rebuilt fresh (no inline innerHTML hacks)
+- **Scroll position** — saved per-session in JS object, restored via requestAnimationFrame
+- **JSONL watcher locked** — no more file switching (prevents cross-contamination from other Claude processes in same project dir)
+- **Session resume watcher** — `_switchJsonl()` updates live watcher when resuming a different session
+- **TTS mute simplified** — mute only in `ttsTap.muted`, no TTS server sync (no stale mute across restarts)
+- **TTS claims on demand** — only claims when feedClean fires, not at session creation (prevents over-claiming)
+- **feedClean improved** — resets dedup per message, sends whole lines instead of splitting on punctuation
+- **Voice selection** — right-click tab menu, project names dash-formatted for TTS server
+- **Side tray refreshes on tab switch** — shows data for the active session
+- **Sessions panel cached** — first load fetches from server, subsequent opens reattach cached DOM
+- **Token count per session** — total tokens displayed on session cards
+- **`fromAgent` flag** — post-agent summary messages tagged for optional filtering
+- **"No response requested"** — filtered from assistant messages
+
+### Architecture
+- `auth.js` — full auth module: QR, passkeys, admin, whitelist, audit log, session persistence
+- `/api/load-session` — switch which JSONL the active session reads from (history + watcher)
+- `/api/session` DELETE — delete JSONL files (blocked for active session)
+- `/api/session-star` POST — favorite/unfavorite sessions
+- `/api/notes` GET/POST — per-project or global notes
+- `/api/mute` POST — sets `ttsTap.muted` only (removed TTS server sync)
+- `entry.jsonlPath` — stored on session entry, used by both history API and live watcher
+- `entry._switchJsonl()` — exposed for session resume
+- `savedScrollPositions` / `scrollLockedToBottom` — per-session scroll state objects
+- `showModal()` — reusable glass confirmation modal
+- `tabOrder` — persistent tab ordering with drag and drop
+- `window._sessionsCache` — per-project DOM cache for sessions panel
+- `.tterm_session_stars.json` — per-project session favorites
+- `.tterm_notes.json` — per-project or global notes storage
+
+---
 
 ## v0.3.2 — Fira Code, VGA Colors & New Tab Button
 _Released: 2026-03-15_

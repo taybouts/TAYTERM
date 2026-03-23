@@ -42,7 +42,8 @@ Hover the right edge to reveal the utility panel:
 - **Flags** — bookmarked assistant responses
 - **Search** — real-time conversation search with highlighted matches in results and bubbles
 - **Gallery** — all images from the session
-- **Sessions** — browse conversation history with previews
+- **Sessions** — browse all JSONL conversations with token counts, click to preview, resume/delete/favorite
+- **Notes** — per-project or general quick notes
 
 ### Zero-Noise TTS
 
@@ -180,6 +181,8 @@ Part of the **T-Server** ecosystem. Shares the design language with T-Legal, T-V
 | `favorites.json` | Project favorites |
 | `.tterm_media.json` | Per-project image references |
 | `.tterm_stars.json` | Flagged/bookmarked messages |
+| `.tterm_notes.json` | Per-project or global notes |
+| `.tterm_session_stars.json` | Favorited JSONL sessions |
 | `.tterm_users.json` | Registered users with roles |
 | `.tterm_passkeys.json` | WebAuthn credentials |
 | `.tterm_whitelist.json` | Trusted device tokens |
@@ -200,6 +203,12 @@ Part of the **T-Server** ecosystem. Shares the design language with T-Legal, T-V
 | `/api/stars` | GET/POST | Star/flag messages |
 | `/api/kill` | POST | Kill PTY for a project |
 | `/api/new-project` | POST | Create project folder |
+| `/api/load-session` | GET | Switch active JSONL for a session |
+| `/api/session` | DELETE | Delete a JSONL session file |
+| `/api/session-star` | POST | Favorite/unfavorite sessions |
+| `/api/notes` | GET/POST | Per-project or global notes |
+| `/api/mute` | POST | Mute/unmute TTS for a session |
+| `/api/stats` | GET | Token/context stats for a session |
 | `/upload` | POST | File/screenshot/photo upload |
 | `/admin` | GET | Admin panel |
 | `/admin/devices` | GET | Registered passkeys + user info |
