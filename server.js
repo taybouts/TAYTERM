@@ -1129,7 +1129,7 @@ async function requestHandler(req, res) {
     }
 
     // Auth routes are always accessible
-    const authPaths = ['/auth/', '/login', '/approve', '/do-approve', '/check', '/register', '/admin'];
+    const authPaths = ['/auth/', '/login', '/approve', '/do-approve', '/check', '/register', '/admin', '/invite'];
     if (authPaths.some(p => pathname === p || pathname.startsWith(p + '/') || pathname.startsWith(p + '?')) || pathname.startsWith('/auth/')) {
         const handled = await handleAuthRoute(req, res, pathname);
         if (handled) return;
@@ -1220,19 +1220,35 @@ async function requestHandler(req, res) {
         } else if (req.method === 'GET' && pathname === '/api/claude-logo') {
             handleClaudeLogo(req, res);
         } else if (req.method === 'GET' && pathname === '/api/chat-media') {
-            // Get saved images/media for a project
-            const name = new URL(req.url, 'https://localhost').searchParams.get('name') || '';
+            // Get saved images/media for a project, filtered by current session
+            const u = new URL(req.url, 'https://localhost');
+            const name = u.searchParams.get('name') || '';
+            const explicitSession = u.searchParams.get('session') || '';
             const mediaFile = path.join(PROJECTS_DIR, name, '.tterm_media.json');
             try {
-                const data = fs.existsSync(mediaFile) ? JSON.parse(fs.readFileSync(mediaFile, 'utf-8')) : [];
+                let data = fs.existsSync(mediaFile) ? JSON.parse(fs.readFileSync(mediaFile, 'utf-8')) : [];
+                let filterSession = explicitSession;
+                if (!filterSession) {
+                    const sKey = name + ':claude';
+                    if (activeTerminals[sKey] && activeTerminals[sKey].jsonlPath) {
+                        filterSession = path.basename(activeTerminals[sKey].jsonlPath, '.jsonl');
+                    }
+                }
+                if (filterSession) {
+                    data = data.filter(m => m.sessionId === filterSession || !m.sessionId);
+                }
                 sendJson(res, data);
             } catch(e) { sendJson(res, []); }
         } else if (req.method === 'POST' && pathname === '/api/chat-media') {
-            // Save an image/media reference
+            // Save an image/media reference, tagged with current session
             const body = await readBody(req);
             const { name, media } = JSON.parse(body.toString('utf-8'));
             const mediaFile = path.join(PROJECTS_DIR, name, '.tterm_media.json');
             try {
+                const sKey = name + ':claude';
+                if (activeTerminals[sKey] && activeTerminals[sKey].jsonlPath) {
+                    media.sessionId = path.basename(activeTerminals[sKey].jsonlPath, '.jsonl');
+                }
                 const existing = fs.existsSync(mediaFile) ? JSON.parse(fs.readFileSync(mediaFile, 'utf-8')) : [];
                 existing.push(media);
                 fs.writeFileSync(mediaFile, JSON.stringify(existing, null, 2));

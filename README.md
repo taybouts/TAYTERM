@@ -72,10 +72,20 @@ Paste or capture a screenshot — it appears as an inline image bubble. Click to
 - **WebAuthn/Passkeys** via 1Password or iCloud Keychain
 - **Two-step registration** — username/profile form, then passkey enrollment
 - **Backup codes** for emergency access (8× XXXX-XXXX format)
+- **Fail-closed** — no passkeys or missing module = block everyone (never fail-open)
+
+### Invite System
+
+- **Admin generates invite links** from `/admin` Invites tab
+- **One-time tokens** — 256-bit, 24h expiry, single-use, revocable
+- **User opens link** → registration page with email pre-filled → passkey enrollment
+- **No open registration** — registration locked to localhost or valid invite token
+- **All actions audited** — create, use, revoke logged
 
 ### Device Whitelist
 
 - Trusted devices skip authentication entirely
+- Localhost (TAYCAST) always trusted — no cookie needed
 - Persistent cookie survives server restarts
 - Manage from Admin panel
 
@@ -85,6 +95,7 @@ Paste or capture a screenshot — it appears as an inline image bubble. Click to
 - **Devices** — registered passkeys with user profile (name, role, device, browser, OS, IP)
 - **Trusted** — whitelist management
 - **Audit Log** — all auth events: logins, failures, registrations, whitelist changes
+- **Invites** — generate, copy, revoke invite links; view pending/used/expired status
 - Sessions persist to disk — survive server restarts
 
 ---
@@ -188,6 +199,7 @@ Part of the **T-Server** ecosystem. Shares the design language with T-Legal, T-V
 | `.tterm_whitelist.json` | Trusted device tokens |
 | `.tterm_sessions.json` | Persistent active sessions |
 | `.tterm_audit.json` | Auth event log |
+| `.tterm_invites.json` | Invite tokens (pending/used/revoked/expired) |
 
 ---
 
@@ -219,6 +231,10 @@ Part of the **T-Server** ecosystem. Shares the design language with T-Legal, T-V
 | `/auth/kill-session` | POST | Revoke a session |
 | `/auth/passkey-options` | POST | Direct passkey auth challenge |
 | `/auth/passkey-verify` | POST | Direct passkey auth verify |
+| `/invite` | GET | Invite registration page (token required) |
+| `/admin/invite-create` | POST | Generate invite link |
+| `/admin/invites` | GET | List all invites |
+| `/admin/invite-revoke` | POST | Revoke a pending invite |
 | `/ws` | WebSocket | PTY + JSONL stream |
 
 ---

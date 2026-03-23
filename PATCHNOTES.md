@@ -1,5 +1,37 @@
 # T-Term Patch Notes
 
+## v0.6.0 — Auth Hardening, Invite System & Media Sessions
+_Released: 2026-03-24_
+
+### New Features
+- **Invite link system** — admin generates one-time invite tokens from `/admin` Invites tab, sends link to user, user registers passkey via the link, token consumed after use
+- **Admin Invites tab** — generate links, copy to clipboard, view pending/used/expired/revoked invites, revoke pending invites
+- **Invite registration page** — dedicated onboarding page with email pre-filled, passkey enrollment, backup codes
+- **Expired invite page** — clean error page for expired or used invite links
+- **Media session tagging** — images tagged with JSONL session ID on save, filtered by current session on load
+- **Send screenshots without text** — Enter or Send button works with just a pending screenshot attachment (no text required)
+
+### Security
+- **Fail-closed auth** — `!hasPasskeys()` and `!simplewebauthn` now return `false` (block everyone), not `true` (open access)
+- **Localhost always trusted** — `isLocalRequest()` added to `isAuthenticated()` so TAYCAST always gets in
+- **Registration locked** — `/register` only accessible from localhost, authenticated admin, or valid invite token
+- **No open registration** — strangers cannot visit `/register` from the internet
+- **Invite tokens** — 256-bit crypto random hex, 24h expiry, single-use, revocable
+- **All invite actions audited** — create, use, revoke logged to audit trail
+
+### Improvements
+- **Messenger send with attachments** — both split view and messenger-only sendMsg functions handle pending attachments without requiring text
+- **`_switchJsonl` interval cleanup** — clears and restarts the polling interval on session switch (was leaking intervals before)
+
+### Architecture
+- `auth.js` — invite storage (`loadInvites`, `saveInvites`, `validateInviteToken`, `consumeInvite`, `isInviteAuthorized`), `isLocalRequest()` helper, `canRegister()` guard function, admin invite API endpoints, invite + expired HTML pages
+- `server.js` — `/invite` added to `authPaths`, media session tagging on POST/GET `/api/chat-media`
+- `static/app.js` — `sendMsg` handles `pendingAttachments` when text is empty
+- `.tterm_invites.json` — invite token storage (id, email, token, createdAt, expiresAt, status, usedAt, usedBy)
+- `static/preview-auth.html` — auth page design preview (login, invite, expired)
+
+---
+
 ## v0.5.0 — Session Browser, Auth System & Mobile PWA
 _Released: 2026-03-23_
 

@@ -31,6 +31,8 @@ const PASSKEY_FILE = path.join(BASE_DIR, '.tterm_passkeys.json');
 const WHITELIST_FILE = path.join(BASE_DIR, '.tterm_whitelist.json');
 const AUDIT_FILE = path.join(BASE_DIR, '.tterm_audit.json');
 const USERS_FILE = path.join(BASE_DIR, '.tterm_users.json');
+const INVITES_FILE = path.join(BASE_DIR, '.tterm_invites.json');
+const INVITE_MAX_AGE = 24 * 60 * 60 * 1000; // 24 hours
 const SESSION_MAX_AGE = 86400; // 24 hours in seconds
 const TOKEN_MAX_AGE = 5 * 60 * 1000; // 5 minutes
 const COOKIE_NAME = 'tterm_session';
@@ -170,6 +172,51 @@ function loadUsers() {
 
 function saveUsers(users) {
     fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2), 'utf-8');
+}
+
+// ---------------------------------------------------------------------------
+//  Invite Storage
+// ---------------------------------------------------------------------------
+
+function loadInvites() {
+    try {
+        if (fs.existsSync(INVITES_FILE)) return JSON.parse(fs.readFileSync(INVITES_FILE, 'utf-8'));
+    } catch (e) {}
+    return [];
+}
+
+function saveInvites(list) {
+    fs.writeFileSync(INVITES_FILE, JSON.stringify(list, null, 2), 'utf-8');
+}
+
+function validateInviteToken(token) {
+    if (!token) return null;
+    const invites = loadInvites();
+    const invite = invites.find(i => i.token === token && i.status === 'pending');
+    if (!invite) return null;
+    if (Date.now() > invite.expiresAt) {
+        invite.status = 'expired';
+        saveInvites(invites);
+        return null;
+    }
+    return invite;
+}
+
+function consumeInvite(token, username) {
+    const invites = loadInvites();
+    const invite = invites.find(i => i.token === token);
+    if (invite) {
+        invite.status = 'used';
+        invite.usedAt = Date.now();
+        invite.usedBy = username;
+        saveInvites(invites);
+        logAudit('invite_used', { email: invite.email, username });
+    }
+}
+
+function isInviteAuthorized(req) {
+    const token = req.headers['x-invite-token'];
+    return validateInviteToken(token) !== null;
 }
 
 // Pending registration: stores user profile until passkey is created
@@ -357,9 +404,10 @@ setInterval(() => {
 // ---------------------------------------------------------------------------
 
 function isAuthenticated(req) {
-    if (!simplewebauthn) return true;
-    if (!hasPasskeys()) return true;
+    if (!simplewebauthn) return false;
     if (isWhitelisted(req)) return true;
+    if (isLocalRequest(req)) return true;
+    if (!hasPasskeys()) return false;
     const sessionId = getSessionFromCookie(req);
     return isValidSession(sessionId);
 }
@@ -406,12 +454,40 @@ async function handleAuthRoute(req, res, pathname) {
         return await handlePasskeyVerify(req, res);
     }
 
-    // Registration — Step 1: Profile form
+    // Invite — one-time link for new user registration
+    if (req.method === 'GET' && pathname === '/invite') {
+        const token = url.searchParams.get('token');
+        if (!token) { res.writeHead(400); res.end('Missing token'); return true; }
+        const invite = validateInviteToken(token);
+        if (!invite) {
+            res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
+            res.end(expiredInviteHTML());
+            return true;
+        }
+        res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
+        res.end(inviteRegisterHTML(invite));
+        return true;
+    }
+
+    // Registration — only allowed from localhost, authenticated admin, or valid invite
+    function canRegister(req) {
+        return isLocalRequest(req) || isAuthenticated(req) || isInviteAuthorized(req);
+    }
+
     if (req.method === 'GET' && pathname === '/register') {
+        if (!canRegister(req)) {
+            res.writeHead(302, { Location: '/login' });
+            res.end();
+            return true;
+        }
         return serveRegisterPage(req, res);
     }
     // Registration — Step 1: Save profile, move to passkey
     if (req.method === 'POST' && pathname === '/register/profile') {
+        if (!canRegister(req)) {
+            sendJson(res, { error: 'Registration closed' }, 403);
+            return true;
+        }
         const body = await readBody(req);
         const { username, displayName, email } = JSON.parse(body.toString('utf-8'));
         if (!username || username.trim().length < 2) {
@@ -429,6 +505,7 @@ async function handleAuthRoute(req, res, pathname) {
             displayName: (displayName || '').trim(),
             email: (email || '').trim(),
             created: Date.now(),
+            inviteToken: req.headers['x-invite-token'] || null,
         };
         logAudit('register_profile', { username: pendingRegistration.username, ip: req.socket.remoteAddress });
         sendJson(res, { ok: true });
@@ -436,10 +513,18 @@ async function handleAuthRoute(req, res, pathname) {
     }
     // Registration — Step 2: WebAuthn start
     if (req.method === 'POST' && pathname === '/register/start') {
+        if (!canRegister(req)) {
+            sendJson(res, { error: 'Registration closed' }, 403);
+            return true;
+        }
         return await handleRegisterStart(req, res);
     }
     // Registration — Step 2: WebAuthn finish
     if (req.method === 'POST' && pathname === '/register/finish') {
+        if (!canRegister(req)) {
+            sendJson(res, { error: 'Registration closed' }, 403);
+            return true;
+        }
         return await handleRegisterFinish(req, res);
     }
 
@@ -641,6 +726,60 @@ async function handleAuthRoute(req, res, pathname) {
         return true;
     }
 
+    // Admin API — create invite
+    if (req.method === 'POST' && pathname === '/admin/invite-create') {
+        if (!isAuthenticated(req)) { sendJson(res, { error: 'Unauthorized' }, 401); return true; }
+        const body = await readBody(req);
+        const { email } = JSON.parse(body.toString('utf-8'));
+        if (!email || !email.includes('@')) { sendJson(res, { error: 'Valid email required' }, 400); return true; }
+        const token = crypto.randomBytes(32).toString('hex');
+        const invites = loadInvites();
+        const invite = {
+            id: crypto.randomUUID(),
+            email: email.trim().toLowerCase(),
+            token,
+            createdAt: Date.now(),
+            expiresAt: Date.now() + INVITE_MAX_AGE,
+            status: 'pending',
+            usedAt: null,
+            usedBy: null,
+        };
+        invites.push(invite);
+        saveInvites(invites);
+        logAudit('invite_created', { email: invite.email, ip: req.socket.remoteAddress });
+        const rpConfig = getRpConfig(req);
+        const host = rpConfig.rpID === 'taybouts.com' ? 'term.taybouts.com' : req.headers.host;
+        const link = `https://${host}/invite?token=${token}`;
+        sendJson(res, { ok: true, link, token, expiresAt: invite.expiresAt });
+        return true;
+    }
+
+    // Admin API — list invites
+    if (req.method === 'GET' && pathname === '/admin/invites') {
+        if (!isAuthenticated(req)) { sendJson(res, { error: 'Unauthorized' }, 401); return true; }
+        const invites = loadInvites().map(i => ({ ...i, token: undefined })); // Don't expose tokens
+        sendJson(res, invites);
+        return true;
+    }
+
+    // Admin API — revoke invite
+    if (req.method === 'POST' && pathname === '/admin/invite-revoke') {
+        if (!isAuthenticated(req)) { sendJson(res, { error: 'Unauthorized' }, 401); return true; }
+        const body = await readBody(req);
+        const { id } = JSON.parse(body.toString('utf-8'));
+        const invites = loadInvites();
+        const invite = invites.find(i => i.id === id);
+        if (invite && invite.status === 'pending') {
+            invite.status = 'revoked';
+            saveInvites(invites);
+            logAudit('invite_revoked', { email: invite.email });
+            sendJson(res, { ok: true });
+        } else {
+            sendJson(res, { error: 'Invite not found or already used' }, 404);
+        }
+        return true;
+    }
+
     return false;
 }
 
@@ -688,6 +827,11 @@ async function serveLoginPage(req, res) {
     res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
     res.end(loginPageHTML(token, qrDataUrl));
     return true;
+}
+
+function isLocalRequest(req) {
+    const ip = req.socket.remoteAddress || '';
+    return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
 }
 
 function isTailscaleRequest(req) {
@@ -1113,10 +1257,17 @@ async function handleRegisterFinish(req, res) {
         const sessionId = createSession(req);
         setSessionCookie(res, sessionId, req);
 
+        // Consume invite token if this was an invite registration
+        const inviteToken = pendingRegistration?.inviteToken || req.headers['x-invite-token'];
+        if (inviteToken) {
+            consumeInvite(inviteToken, pendingRegistration?.username || 'unknown');
+        }
+
         logAudit('register', {
             ip: req.socket.remoteAddress,
             username: pendingRegistration?.username,
             deviceType: credentialDeviceType,
+            viaInvite: !!inviteToken,
         });
         pendingRegistration = null;
         sendJson(res, { verified: true, backupCodes });
@@ -2098,6 +2249,200 @@ function showStatus(msg) {
 </html>`;
 
 // ---------------------------------------------------------------------------
+//  Invite Registration HTML
+// ---------------------------------------------------------------------------
+
+function expiredInviteHTML() {
+    return `<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>T-TERM — Invite Expired</title>
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    min-height: 100vh;
+    background: linear-gradient(135deg, #0a0a0f 0%, #0d1117 30%, #0a0f1a 60%, #0a0a0f 100%);
+    font-family: 'Segoe UI', Arial, sans-serif; color: #e6edf3;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+}
+.container {
+    text-align: center; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 24px; padding: 48px 44px; backdrop-filter: blur(20px); max-width: 420px; width: 90%;
+}
+.logo { font-family: 'Rajdhani', sans-serif; font-size: 48px; font-weight: 700; letter-spacing: 12px;
+    background: linear-gradient(135deg, #38bdf8 0%, #0284c7 100%);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 4px; }
+.subtitle { font-family: 'Share Tech Mono', monospace; font-size: 11px; letter-spacing: 6px; color: #475569; margin-bottom: 40px; text-transform: uppercase; }
+.msg { font-size: 16px; color: #94a3b8; margin-bottom: 24px; line-height: 1.6; }
+.btn { display: inline-block; padding: 14px 32px; border-radius: 10px; border: none;
+    background: linear-gradient(135deg, #0284c7, #38bdf8); color: white;
+    font-family: 'Rajdhani', sans-serif; font-size: 16px; font-weight: 700;
+    cursor: pointer; letter-spacing: 2px; text-transform: uppercase; text-decoration: none; }
+</style></head><body>
+<div class="container">
+    <div class="logo">T-TERM</div>
+    <div class="subtitle">Invite Link</div>
+    <div class="msg">This invite link has expired or has already been used.</div>
+    <a class="btn" href="/login">Go to Login</a>
+</div>
+</body></html>`;
+}
+
+function inviteRegisterHTML(invite) {
+    return `<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>T-TERM — You're Invited</title>
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    min-height: 100vh;
+    background: linear-gradient(135deg, #0a0a0f 0%, #0d1117 30%, #0a0f1a 60%, #0a0a0f 100%);
+    font-family: 'Segoe UI', Arial, sans-serif; color: #e6edf3;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    position: relative; overflow: hidden;
+}
+body::before {
+    content: ''; position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    background-image: linear-gradient(rgba(56, 189, 248, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(56, 189, 248, 0.03) 1px, transparent 1px);
+    background-size: 60px 60px; z-index: 0;
+}
+.container {
+    position: relative; z-index: 1; text-align: center;
+    background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 24px; padding: 48px 44px; backdrop-filter: blur(20px);
+    max-width: 420px; width: 90%;
+}
+.logo { font-family: 'Rajdhani', sans-serif; font-size: 48px; font-weight: 700; letter-spacing: 12px;
+    background: linear-gradient(135deg, #38bdf8 0%, #0284c7 100%);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 4px; }
+.subtitle { font-family: 'Share Tech Mono', monospace; font-size: 11px; letter-spacing: 6px; color: #475569; margin-bottom: 32px; text-transform: uppercase; }
+.invite-badge { display: inline-block; padding: 8px 16px; border-radius: 8px;
+    background: rgba(56, 189, 248, 0.08); border: 1px solid rgba(56, 189, 248, 0.2);
+    color: #38bdf8; font-family: 'Share Tech Mono', monospace; font-size: 12px;
+    letter-spacing: 1px; margin-bottom: 28px; }
+.form-group { margin-bottom: 16px; text-align: left; }
+.form-label { font-family: 'Share Tech Mono', monospace; font-size: 10px; letter-spacing: 2px;
+    color: #475569; text-transform: uppercase; margin-bottom: 6px; display: block; }
+.form-input { width: 100%; padding: 12px 16px; background: rgba(255,255,255,0.04);
+    color: #e6edf3; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px;
+    font-family: 'Segoe UI', sans-serif; font-size: 14px; }
+.form-input:focus { outline: none; border-color: rgba(56, 189, 248, 0.4); }
+.form-input:read-only { opacity: 0.6; cursor: not-allowed; }
+.btn { display: block; width: 100%; padding: 14px; border-radius: 10px; border: none;
+    background: linear-gradient(135deg, #0284c7, #38bdf8); color: white;
+    font-family: 'Rajdhani', sans-serif; font-size: 16px; font-weight: 700;
+    cursor: pointer; letter-spacing: 2px; text-transform: uppercase; transition: all 0.3s; margin-top: 8px; }
+.btn:hover { box-shadow: 0 4px 20px rgba(2,132,199,0.3); }
+.btn:active { transform: scale(0.97); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-success { background: linear-gradient(135deg, #059669, #22c55e); }
+.error { color: #ef4444; margin-top: 12px; font-size: 12px; font-family: 'Share Tech Mono', monospace; display: none; }
+.status { margin-top: 16px; font-family: 'Share Tech Mono', monospace; font-size: 12px; color: #94a3b8; display: none; }
+#step-2 { display: none; }
+#step-3 { display: none; }
+.backup-codes { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px; padding: 16px; margin: 16px 0; font-family: 'Share Tech Mono', monospace;
+    font-size: 14px; letter-spacing: 2px; line-height: 2; color: #38bdf8; }
+</style></head><body>
+<div class="container">
+    <div class="logo">T-TERM</div>
+    <div class="subtitle">You're Invited</div>
+    <div class="invite-badge">Invited: ${invite.email}</div>
+
+    <div id="step-1">
+        <div class="form-group">
+            <label class="form-label">Username</label>
+            <input class="form-input" id="username" placeholder="Choose a username" autocomplete="off">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Display Name</label>
+            <input class="form-input" id="displayName" placeholder="Your name">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Email</label>
+            <input class="form-input" id="email" value="${invite.email}" readonly>
+        </div>
+        <button class="btn" id="btn-continue" onclick="submitProfile()">Continue</button>
+    </div>
+
+    <div id="step-2">
+        <p style="color:#94a3b8; margin-bottom:20px;">Register a passkey using your device's biometrics</p>
+        <button class="btn" id="btn-register" onclick="registerDevice()">Register Passkey</button>
+    </div>
+
+    <div id="step-3">
+        <p style="color:#22c55e; margin-bottom:16px; font-family:'Share Tech Mono',monospace; letter-spacing:1px;">Registration complete!</p>
+        <p style="color:#94a3b8; margin-bottom:12px; font-size:13px;">Save your backup codes. They can be used if you lose access to your device:</p>
+        <div class="backup-codes" id="backup-codes"></div>
+        <button class="btn btn-success" onclick="window.location.href='/'">Continue to T-TERM</button>
+    </div>
+
+    <div class="error" id="error"></div>
+    <div class="status" id="status"></div>
+</div>
+<script src="https://unpkg.com/@simplewebauthn/browser/dist/bundle/index.umd.min.js"></script>
+<script>
+const INVITE_TOKEN = '${invite.token}';
+const headers = { 'Content-Type': 'application/json', 'x-invite-token': INVITE_TOKEN };
+
+function showError(msg) {
+    const el = document.getElementById('error');
+    el.textContent = msg; el.style.display = 'block';
+    setTimeout(() => el.style.display = 'none', 5000);
+}
+
+async function submitProfile() {
+    const username = document.getElementById('username').value.trim();
+    const displayName = document.getElementById('displayName').value.trim();
+    const email = document.getElementById('email').value.trim();
+    if (!username || username.length < 2) { showError('Username is required (min 2 characters)'); return; }
+    const btn = document.getElementById('btn-continue');
+    btn.disabled = true; btn.textContent = 'Saving...';
+    try {
+        const resp = await fetch('/register/profile', {
+            method: 'POST', headers,
+            body: JSON.stringify({ username, displayName, email })
+        });
+        const data = await resp.json();
+        if (data.error) { showError(data.error); btn.disabled = false; btn.textContent = 'Continue'; return; }
+        document.getElementById('step-1').style.display = 'none';
+        document.getElementById('step-2').style.display = 'block';
+    } catch(e) { showError('Network error'); btn.disabled = false; btn.textContent = 'Continue'; }
+}
+
+async function registerDevice() {
+    const btn = document.getElementById('btn-register');
+    btn.disabled = true; btn.textContent = 'Waiting for device...';
+    try {
+        const optResp = await fetch('/register/start', { method: 'POST', headers });
+        const options = await optResp.json();
+        if (options.error) { showError(options.error); btn.disabled = false; btn.textContent = 'Register Passkey'; return; }
+        const credential = await SimpleWebAuthnBrowser.startRegistration({ optionsJSON: options });
+        const verResp = await fetch('/register/finish', {
+            method: 'POST', headers,
+            body: JSON.stringify(credential)
+        });
+        const result = await verResp.json();
+        if (result.verified) {
+            document.getElementById('step-2').style.display = 'none';
+            document.getElementById('step-3').style.display = 'block';
+            if (result.backupCodes) {
+                document.getElementById('backup-codes').textContent = result.backupCodes.join('\\n');
+            }
+        } else { showError(result.error || 'Registration failed'); btn.disabled = false; btn.textContent = 'Register Passkey'; }
+    } catch(e) { showError(e.message || 'Registration cancelled'); btn.disabled = false; btn.textContent = 'Register Passkey'; }
+}
+</script>
+</body></html>`;
+}
+
+// ---------------------------------------------------------------------------
 //  Admin Page HTML
 // ---------------------------------------------------------------------------
 
@@ -2263,6 +2608,7 @@ body::before {
         <div class="tab" onclick="switchTab('devices')">Devices</div>
         <div class="tab" onclick="switchTab('whitelist')">Trusted</div>
         <div class="tab" onclick="switchTab('audit')">Audit Log</div>
+        <div class="tab" onclick="switchTab('invites')">Invites</div>
     </div>
 
     <!-- Sessions Panel -->
@@ -2291,6 +2637,22 @@ body::before {
     <div class="panel" id="panel-audit">
         <div class="section-title" id="audit-count"></div>
         <div id="audit-list"></div>
+    </div>
+
+    <!-- Invites Panel -->
+    <div class="panel" id="panel-invites">
+        <div class="wl-form">
+            <input class="wl-input" id="invite-email" placeholder="Email address to invite" type="email">
+            <button class="btn-action" onclick="createInvite()">Generate Link</button>
+        </div>
+        <div id="invite-link-box" style="display:none; margin:16px 0; padding:12px 16px; background:rgba(56,189,248,0.08); border:1px solid rgba(56,189,248,0.2); border-radius:8px;">
+            <div style="font-family:'Share Tech Mono',monospace; font-size:10px; color:#475569; letter-spacing:1px; margin-bottom:8px;">INVITE LINK (copy and send):</div>
+            <div id="invite-link-text" style="font-family:'Share Tech Mono',monospace; font-size:11px; color:#38bdf8; word-break:break-all; margin-bottom:8px;"></div>
+            <button class="btn-action" onclick="copyInviteLink()" style="font-size:10px; padding:6px 12px;">Copy Link</button>
+            <span id="copy-confirm" style="font-family:'Share Tech Mono',monospace; font-size:10px; color:#22c55e; margin-left:8px; display:none;">Copied!</span>
+        </div>
+        <div class="section-title" id="invites-count"></div>
+        <div id="invites-list"></div>
     </div>
 </div>
 
@@ -2448,11 +2810,73 @@ async function loadAudit() {
     }).join('');
 }
 
+let lastInviteLink = '';
+
+async function loadInvites() {
+    try {
+        const resp = await fetch('/admin/invites');
+        const invites = await resp.json();
+        const el = document.getElementById('invites-list');
+        const countEl = document.getElementById('invites-count');
+        const pending = invites.filter(i => i.status === 'pending');
+        countEl.textContent = pending.length + ' pending, ' + invites.length + ' total';
+        el.innerHTML = invites.sort((a,b) => b.createdAt - a.createdAt).map(i => {
+            const dotColor = i.status === 'pending' ? '#22c55e' : i.status === 'used' ? '#38bdf8' : '#ef4444';
+            const statusTag = i.status === 'pending' ? 'PENDING' : i.status === 'used' ? 'USED' : i.status.toUpperCase();
+            const date = new Date(i.createdAt).toLocaleString();
+            const expires = new Date(i.expiresAt).toLocaleString();
+            const usedInfo = i.usedBy ? ' by ' + i.usedBy + ' at ' + new Date(i.usedAt).toLocaleString() : '';
+            const revokeBtn = i.status === 'pending' ? '<button class="btn-remove" onclick="revokeInvite(\\'' + i.id + '\\', this)">Revoke</button>' : '';
+            return '<div class="card"><div class="dot" style="background:' + dotColor + '"></div>' +
+                '<div class="card-info"><div class="card-label">' + i.email + ' <span style="opacity:0.5; font-size:10px;">(' + statusTag + ')</span></div>' +
+                '<div class="card-meta">Created: ' + date + ' | Expires: ' + expires + usedInfo + '</div></div>' +
+                revokeBtn + '</div>';
+        }).join('');
+    } catch(e) {}
+}
+
+async function createInvite() {
+    const email = document.getElementById('invite-email').value.trim();
+    if (!email || !email.includes('@')) { alert('Enter a valid email'); return; }
+    try {
+        const resp = await fetch('/admin/invite-create', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email })
+        });
+        const data = await resp.json();
+        if (data.error) { alert(data.error); return; }
+        lastInviteLink = data.link;
+        document.getElementById('invite-link-text').textContent = data.link;
+        document.getElementById('invite-link-box').style.display = 'block';
+        document.getElementById('invite-email').value = '';
+        loadInvites();
+    } catch(e) { alert('Failed to create invite'); }
+}
+
+function copyInviteLink() {
+    navigator.clipboard.writeText(lastInviteLink).then(() => {
+        const c = document.getElementById('copy-confirm');
+        c.style.display = 'inline'; setTimeout(() => c.style.display = 'none', 2000);
+    });
+}
+
+async function revokeInvite(id, btn) {
+    btn.disabled = true; btn.textContent = 'Revoking...';
+    try {
+        await fetch('/admin/invite-revoke', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id })
+        });
+        loadInvites();
+    } catch(e) { btn.disabled = false; btn.textContent = 'Revoke'; }
+}
+
 // Init
 loadSessions();
 loadDevices();
 loadWhitelist();
 loadAudit();
+loadInvites();
 setInterval(loadSessions, 10000);
 </script>
 </body>

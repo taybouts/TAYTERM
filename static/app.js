@@ -1162,15 +1162,25 @@ function renderSplitView() {
   const sendBtn = inputArea.querySelector('.send-btn');
   const sendMsg = () => {
     const text = textarea.value.trim();
-    if (!text) return;
+    const atts = pendingAttachments[sid] || [];
+    if (!text && atts.length === 0) return;
     const ws = s.ws;
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'input', data: text }));
-      const delay = Math.max(100, Math.min(text.length * 2, 500));
-      setTimeout(() => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'input', data: '\r' })); }, delay);
+      // Send pending attachments first
+      if (atts.length > 0) {
+        const paths = atts.map(a => a.path).join(' ');
+        const combined = text ? text + ' ' + paths : paths;
+        ws.send(JSON.stringify({ type: 'input', data: combined }));
+        setTimeout(() => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'input', data: '\r' })); }, Math.max(100, Math.min(combined.length * 2, 500)));
+        clearAllAttachments(sid);
+      } else {
+        ws.send(JSON.stringify({ type: 'input', data: text }));
+        const delay = Math.max(100, Math.min(text.length * 2, 500));
+        setTimeout(() => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'input', data: '\r' })); }, delay);
+      }
     }
     if (sessions[sid]) { sessions[sid]._lastSendTime = Date.now(); sessions[sid].activeAgents = 0; sessions[sid].toolHistory = []; }
-    addMessengerMessage(sid, 'user', text);
+    if (text) addMessengerMessage(sid, 'user', text);
     showMessengerTyping(sid, true);
     textarea.value = '';
     textarea.style.height = '44px';
@@ -1364,24 +1374,28 @@ function createMessengerPane(sid, paneIdx, totalPanes) {
   const sendBtn = inputArea.querySelector('.send-btn');
   const sendMsg = () => {
     const text = textarea.value.trim();
-    if (!text || !sid || !sessions[sid]) return;
+    const atts = pendingAttachments[sid] || [];
+    if ((!text && atts.length === 0) || !sid || !sessions[sid]) return;
     const ws = sessions[sid].ws;
     if (ws.readyState === WebSocket.OPEN) {
-      // Send text and carriage return separately — longer delay for longer text
-      ws.send(JSON.stringify({ type: 'input', data: text }));
-      const delay = Math.max(100, Math.min(text.length * 2, 500));
-      setTimeout(() => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'input', data: '\r' }));
-        }
-      }, delay);
+      if (atts.length > 0) {
+        const paths = atts.map(a => a.path).join(' ');
+        const combined = text ? text + ' ' + paths : paths;
+        ws.send(JSON.stringify({ type: 'input', data: combined }));
+        setTimeout(() => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'input', data: '\r' })); }, Math.max(100, Math.min(combined.length * 2, 500)));
+        clearAllAttachments(sid);
+      } else {
+        ws.send(JSON.stringify({ type: 'input', data: text }));
+        const delay = Math.max(100, Math.min(text.length * 2, 500));
+        setTimeout(() => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'input', data: '\r' })); }, delay);
+      }
     }
     if (sessions[sid]) {
       sessions[sid]._lastSendTime = Date.now();
       sessions[sid].activeAgents = 0;
       sessions[sid].toolHistory = [];
     }
-    addMessengerMessage(sid, 'user', text);
+    if (text) addMessengerMessage(sid, 'user', text);
     showMessengerTyping(sid, true);
     textarea.value = '';
     textarea.style.height = '44px';

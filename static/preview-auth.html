@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Auth Pages Preview</title>
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+/* Nav */
+.preview-nav {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    display: flex; gap: 0; background: rgba(10,10,15,0.95);
+    border-bottom: 1px solid rgba(56,189,248,0.15);
+    backdrop-filter: blur(12px);
+    padding: env(safe-area-inset-top) 0 0 0;
+}
+.preview-nav button {
+    flex: 1; padding: 14px 8px; border: none; background: transparent;
+    color: #475569; font-family: 'Share Tech Mono', monospace; font-size: 10px;
+    letter-spacing: 1px; text-transform: uppercase; cursor: pointer;
+    border-bottom: 2px solid transparent; transition: all 0.2s;
+}
+.preview-nav button.active {
+    color: #38bdf8; border-bottom-color: #38bdf8;
+}
+
+/* Pages */
+.preview-page {
+    display: none; min-height: 100vh;
+    padding-top: 52px; /* nav height */
+}
+.preview-page.active { display: flex; }
+
+/* Shared auth styles */
+body {
+    background: linear-gradient(135deg, #0a0a0f 0%, #0d1117 30%, #0a0f1a 60%, #0a0a0f 100%);
+    font-family: 'Segoe UI', Arial, sans-serif; color: #e6edf3;
+}
+.auth-bg {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background-image: linear-gradient(rgba(56, 189, 248, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(56, 189, 248, 0.03) 1px, transparent 1px);
+    background-size: 60px 60px; z-index: 0; pointer-events: none;
+}
+.scan-line {
+    position: fixed; width: 100%; height: 2px; left: 0;
+    background: linear-gradient(90deg, transparent, rgba(56,189,248,0.06), transparent);
+    animation: scan 8s linear infinite; z-index: 0; pointer-events: none;
+}
+@keyframes scan { from { top: -2px; } to { top: 100%; } }
+
+.page-inner {
+    flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    position: relative; z-index: 1; padding: 20px;
+    min-height: calc(100vh - 52px);
+}
+.container {
+    text-align: center;
+    background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 24px; padding: 40px 36px; backdrop-filter: blur(20px);
+    max-width: 420px; width: 100%;
+    animation: containerIn 0.8s ease;
+}
+@keyframes containerIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+
+.logo {
+    font-family: 'Rajdhani', sans-serif; font-size: 42px; font-weight: 700;
+    letter-spacing: 10px; text-transform: uppercase;
+    background: linear-gradient(135deg, #38bdf8 0%, #0284c7 100%);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text; margin-bottom: 4px;
+}
+.subtitle {
+    font-family: 'Share Tech Mono', monospace; font-size: 10px;
+    letter-spacing: 5px; color: #475569; margin-bottom: 32px; text-transform: uppercase;
+}
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+/* QR */
+.qr-container {
+    background: white; border-radius: 16px; padding: 14px; display: inline-block;
+    margin-bottom: 20px;
+    box-shadow: 0 0 40px rgba(56, 189, 248, 0.1);
+    animation: pulse 3s ease-in-out infinite;
+}
+.qr-container img { display: block; border-radius: 8px; width: 180px; height: 180px; }
+@keyframes pulse {
+    0%, 100% { box-shadow: 0 0 20px rgba(56, 189, 248, 0.1); }
+    50% { box-shadow: 0 0 50px rgba(56, 189, 248, 0.2); }
+}
+.scan-text { font-size: 13px; color: #94a3b8; margin-bottom: 4px; }
+.scan-hint { font-family: 'Share Tech Mono', monospace; font-size: 9px; color: #475569; letter-spacing: 1px; }
+
+.status {
+    margin-top: 20px; padding: 10px 16px; border-radius: 8px;
+    font-family: 'Share Tech Mono', monospace; font-size: 11px; letter-spacing: 1px;
+}
+.waiting { background: rgba(56, 189, 248, 0.08); border: 1px solid rgba(56, 189, 248, 0.2); color: #38bdf8; }
+
+.divider { border: none; border-top: 1px solid rgba(255,255,255,0.06); margin: 20px 0; }
+
+.btn-passkey {
+    display: block; width: 100%; padding: 14px; border-radius: 10px; border: none;
+    background: linear-gradient(135deg, #0284c7, #38bdf8);
+    color: white; font-family: 'Rajdhani', sans-serif; font-size: 16px;
+    font-weight: 700; cursor: pointer; letter-spacing: 2px; text-transform: uppercase;
+    transition: all 0.3s; margin-bottom: 14px;
+}
+.btn-passkey:active { transform: scale(0.97); }
+.backup-link {
+    font-family: 'Share Tech Mono', monospace; font-size: 10px; letter-spacing: 1px;
+    color: #475569; cursor: pointer; text-decoration: none; text-transform: uppercase;
+}
+
+/* Orbs */
+.orb { position: fixed; border-radius: 50%; filter: blur(100px); opacity: 0.08; z-index: 0; pointer-events: none; }
+.orb1 { width: 400px; height: 400px; background: #38bdf8; top: -150px; left: -150px; }
+.orb2 { width: 300px; height: 300px; background: #0284c7; bottom: -100px; right: -100px; }
+
+/* HUD corners */
+.hud { position: fixed; width: 28px; height: 28px; z-index: 2; pointer-events: none; opacity: 0.15; }
+.hud::before, .hud::after { content: ''; position: absolute; background: #38bdf8; }
+.hud-tl { top: 56px; left: 10px; } .hud-tl::before { width: 18px; height: 1px; } .hud-tl::after { width: 1px; height: 18px; }
+.hud-tr { top: 56px; right: 10px; } .hud-tr::before { width: 18px; height: 1px; right: 0; } .hud-tr::after { width: 1px; height: 18px; right: 0; }
+.hud-bl { bottom: 10px; left: 10px; } .hud-bl::before { width: 18px; height: 1px; bottom: 0; } .hud-bl::after { width: 1px; height: 18px; bottom: 0; }
+.hud-br { bottom: 10px; right: 10px; } .hud-br::before { width: 18px; height: 1px; right: 0; bottom: 0; } .hud-br::after { width: 1px; height: 18px; right: 0; bottom: 0; }
+
+/* Invite page */
+.invite-badge {
+    display: inline-block; padding: 8px 16px; border-radius: 8px;
+    background: rgba(56, 189, 248, 0.08); border: 1px solid rgba(56, 189, 248, 0.2);
+    color: #38bdf8; font-family: 'Share Tech Mono', monospace; font-size: 11px;
+    letter-spacing: 1px; margin-bottom: 24px;
+}
+.form-group { margin-bottom: 14px; text-align: left; }
+.form-label {
+    font-family: 'Share Tech Mono', monospace; font-size: 9px; letter-spacing: 2px;
+    color: #475569; text-transform: uppercase; margin-bottom: 6px; display: block;
+}
+.form-input {
+    width: 100%; padding: 12px 14px; background: rgba(255,255,255,0.04);
+    color: #e6edf3; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px;
+    font-family: 'Segoe UI', sans-serif; font-size: 14px;
+}
+.form-input:focus { outline: none; border-color: rgba(56, 189, 248, 0.4); }
+.form-input.readonly { opacity: 0.6; }
+
+/* Expired page */
+.expired-icon {
+    width: 64px; height: 64px; margin: 0 auto 20px;
+    border: 2px solid rgba(239, 68, 68, 0.3); border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+}
+.expired-icon svg { width: 28px; height: 28px; stroke: #ef4444; fill: none; stroke-width: 2; }
+.expired-msg { font-size: 15px; color: #94a3b8; margin-bottom: 24px; line-height: 1.6; }
+.btn-outline {
+    display: inline-block; padding: 12px 28px; border-radius: 10px;
+    border: 1px solid rgba(56,189,248,0.3); background: transparent;
+    color: #38bdf8; font-family: 'Rajdhani', sans-serif; font-size: 14px;
+    font-weight: 700; cursor: pointer; letter-spacing: 2px; text-transform: uppercase;
+    text-decoration: none; transition: all 0.3s;
+}
+</style>
+</head>
+<body>
+
+<div class="auth-bg"></div>
+<div class="scan-line"></div>
+<div class="orb orb1"></div>
+<div class="orb orb2"></div>
+<div class="hud hud-tl"></div><div class="hud hud-tr"></div>
+<div class="hud hud-bl"></div><div class="hud hud-br"></div>
+
+<div class="preview-nav">
+    <button class="active" onclick="showPage('login')">Login</button>
+    <button onclick="showPage('invite')">Invite</button>
+    <button onclick="showPage('expired')">Expired</button>
+</div>
+
+<!-- LOGIN PAGE -->
+<div class="preview-page active" id="page-login">
+    <div class="page-inner">
+        <div class="container">
+            <div class="logo">T-TERM</div>
+            <div class="subtitle">Secure Access</div>
+            <div class="qr-container">
+                <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Crect fill='%23f0f0f0' width='180' height='180' rx='8'/%3E%3Ctext x='90' y='95' text-anchor='middle' font-family='monospace' font-size='12' fill='%23999'%3EQR CODE%3C/text%3E%3C/svg%3E" alt="QR Code">
+            </div>
+            <div class="scan-text">Scan with your phone to sign in</div>
+            <div class="scan-hint">Point your camera at the QR code</div>
+            <div class="status waiting">Waiting for approval...</div>
+            <hr class="divider">
+            <button class="btn-passkey">Sign in with Passkey</button>
+            <a class="backup-link">Use backup code instead</a>
+        </div>
+    </div>
+</div>
+
+<!-- INVITE PAGE -->
+<div class="preview-page" id="page-invite">
+    <div class="page-inner">
+        <div class="container">
+            <div class="logo">T-TERM</div>
+            <div class="subtitle">You're Invited</div>
+            <div class="invite-badge">Invited: user@example.com</div>
+            <div class="form-group">
+                <label class="form-label">Username</label>
+                <input class="form-input" placeholder="Choose a username">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Display Name</label>
+                <input class="form-input" placeholder="Your name">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Email</label>
+                <input class="form-input readonly" value="user@example.com" readonly>
+            </div>
+            <button class="btn-passkey" style="margin-top: 8px;">Continue</button>
+        </div>
+    </div>
+</div>
+
+<!-- EXPIRED PAGE -->
+<div class="preview-page" id="page-expired">
+    <div class="page-inner">
+        <div class="container">
+            <div class="logo">T-TERM</div>
+            <div class="subtitle">Invite Link</div>
+            <div class="expired-icon">
+                <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+            </div>
+            <div class="expired-msg">This invite link has expired or has already been used.</div>
+            <a class="btn-outline" href="#">Go to Login</a>
+        </div>
+    </div>
+</div>
+
+<script>
+function showPage(name) {
+    document.querySelectorAll('.preview-page').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.preview-nav button').forEach(b => b.classList.remove('active'));
+    document.getElementById('page-' + name).classList.add('active');
+    event.target.classList.add('active');
+}
+</script>
+</body>
+</html>
