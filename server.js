@@ -106,25 +106,39 @@ class TTSTap {
     _shouldSkip(line) {
         const stripped = line.trim();
         if (!stripped || stripped.length <= 2) return true;
+        // Strip non-ASCII first
+        const ascii = stripped.replace(/[^\x20-\x7E]/g, '').trim();
+        if (!ascii || ascii.length <= 2) return true;
+        // Code blocks
         if (/^\s*```/.test(stripped)) {
             this.inCodeBlock = !this.inCodeBlock;
             return true;
         }
         if (this.inCodeBlock) return true;
-        if (/^\s*\|.*\|/.test(stripped)) return true;
-        if (/^\s*[-=]{3,}$/.test(stripped)) return true;
-        if (/^\s*(>|\$|#!|C:\\|\/[a-z]|PS\s)/.test(stripped)) return true;
-        if (/^\s*(Windows PowerShell|Copyright|All rights reserved|Install the latest|https?:\/\/)/.test(stripped)) return true;
-        if (/^\s*(claude|git|python|pip|npm|node|cd |ls |dir |cat )/.test(stripped)) return true;
-        const alphaChars = (stripped.match(/[a-zA-Z]/g) || []).length;
-        if (stripped.length > 0 && alphaChars / stripped.length < 0.4) return true;
-        if (stripped.split(/\s+/).length < 5) return true;
+        // Anything with | is likely a table, status bar, or separator
+        if (/\|/.test(ascii)) return true;
+        // Anything with [] is likely a progress bar, log prefix, or UI element
+        if (/\[.*\]/.test(ascii)) return true;
+        // Lines starting with non-letter (symbols, numbers, paths, prompts)
+        if (!/^[A-Za-z]/.test(ascii)) return true;
+        // Skip known terminal/system patterns
+        if (/^(Tip:|Use |Press |Copyright|Windows|PS |claude |git |python |pip |npm |node )/.test(ascii)) return true;
+        if (/https?:\/\//.test(ascii)) return true;
+        if (/ctrl\+|shift\+|alt\+/i.test(ascii)) return true;
+        // Must be mostly letters and spaces (natural language)
+        const alphaSpaces = (ascii.match(/[a-zA-Z\s]/g) || []).length;
+        if (alphaSpaces / ascii.length < 0.7) return true;
+        // Must have at least 5 words
+        if (ascii.split(/\s+/).length < 5) return true;
         return false;
     }
 
     _sendToTts(sentence) {
         try {
-            const data = JSON.stringify({ text: sentence, project: this.project });
+            // Strip non-ASCII to prevent Unicode encoding crashes on Windows
+            const clean = sentence.replace(/[^\x20-\x7E]/g, '').trim();
+            if (!clean || clean.length <= 2) return;
+            const data = JSON.stringify({ text: clean, project: this.project });
             const url = new URL('/speak', TTS_URL);
             const req = http.request({
                 hostname: url.hostname,
@@ -208,20 +222,17 @@ class TTSTap {
 
     feedClean(text) {
         if (this.muted) return;
+        // Reset dedup for each new message — prevents stale keys from eating sentences
+        this.sentencesSent = new Set();
         const lines = text.split('\n');
         for (const line of lines) {
             const cleaned = this._cleanMarkdown(line);
             if (!cleaned || cleaned.length <= 3) continue;
-            // Split on sentence endings (. ! ?) but NOT on colons — they fragment lists
-            const parts = cleaned.split(/(?<=[.!?])(?:\s+|\n)/);
-            for (const sentence of parts) {
-                const s = sentence.trim();
-                if (!s || s.length <= 3) continue;
-                const key = s.slice(0, 120);
-                if (this.sentencesSent.has(key)) continue;
-                this.sentencesSent.add(key);
-                this._sendToTts(s);
-            }
+            // Send each line as a chunk — don't split on punctuation (causes drops)
+            const key = cleaned.slice(0, 120);
+            if (this.sentencesSent.has(key)) continue;
+            this.sentencesSent.add(key);
+            this._sendToTts(cleaned);
         }
     }
 }
@@ -294,8 +305,11 @@ function startReader(sessionKey) {
                                     }
                                 } catch (e) { /* ignore */ }
                             }
-                            if (msg.type === 'chat' && msg.role === 'assistant' && ttsTap) {
-                                try { ttsTap.feedClean(msg.text); } catch (e) { /* ignore */ }
+                            if (msg.type === 'chat' && msg.role === 'assistant' && ttsTap && !ttsTap.muted) {
+                                try {
+                                    claimProject(entry.name || sessionKey.split(':')[0]);
+                                    ttsTap.feedClean(msg.text);
+                                } catch (e) { /* ignore */ }
                             }
                         }
                     } catch (e) { /* skip unparseable lines */ }
@@ -304,11 +318,13 @@ function startReader(sessionKey) {
         }
 
         let isThinking = false;
+        let insideAgent = false; // Track when we're processing agent tool results
 
         function parseJsonlEntry(obj) {
             const entryType = obj.type;
             if (entryType === 'user') {
                 isThinking = true; // User sent message — Claude will start thinking
+                insideAgent = false; // Reset agent tracking on new user message
                 const content = obj.message?.content;
                 let text = '';
                 if (Array.isArray(content)) {
@@ -350,13 +366,21 @@ function startReader(sessionKey) {
                 }
                 if (text.trim()) {
                     isThinking = false;
+                    // Skip short system fragments that aren't real conversation
+                    const t = text.trim();
+                    if (/^No response requested\.?$/i.test(t)) return null;
+                    if (t.length < 5 && !/[a-z]/i.test(t)) return null;
+                    const isAgentRelated = insideAgent && tools.length === 0;
+                    if (agentCount > 0) insideAgent = true;
+                    else insideAgent = false;
                     if (tools.length > 0) {
-                        return { type: 'chat', role: 'assistant', text: text.trim(), tools, agents: agentCount, ...tokenInfo };
+                        return { type: 'chat', role: 'assistant', text: text.trim(), tools, agents: agentCount, fromAgent: isAgentRelated, ...tokenInfo };
                     }
-                    return { type: 'chat', role: 'assistant', text: text.trim(), ...tokenInfo };
+                    return { type: 'chat', role: 'assistant', text: text.trim(), fromAgent: isAgentRelated, ...tokenInfo };
                 }
                 if (tools.length > 0) {
                     isThinking = true;
+                    if (agentCount > 0) insideAgent = true;
                     return { type: 'tool', tools, agents: agentCount, ...tokenInfo };
                 }
             }
@@ -367,6 +391,8 @@ function startReader(sessionKey) {
         setTimeout(() => {
             jsonlPath = findLatestJsonl();
             if (jsonlPath) {
+                // Store on entry so history API can use the same file
+                entry.jsonlPath = jsonlPath;
                 // Start at end of file (don't replay history)
                 jsonlPos = fs.statSync(jsonlPath).size;
                 log(`Watching JSONL: ${jsonlPath}`);
@@ -374,20 +400,22 @@ function startReader(sessionKey) {
                 // Watch for changes
                 jsonlWatcher = fs.watch(jsonlPath, () => readNewLines());
 
-                // Also poll periodically in case fs.watch misses events
+                // Poll periodically in case fs.watch misses events
                 entry._jsonlInterval = setInterval(() => {
-                    // Check if a newer JSONL appeared
-                    const latest = findLatestJsonl();
-                    if (latest && latest !== jsonlPath) {
-                        jsonlPath = latest;
-                        jsonlPos = 0;
-                        if (jsonlWatcher) jsonlWatcher.close();
-                        jsonlWatcher = fs.watch(jsonlPath, () => readNewLines());
-                        log(`Switched JSONL: ${jsonlPath}`);
-                    }
                     readNewLines();
                 }, 1000);
             }
+
+            // Expose switch function for session resume
+            entry._switchJsonl = (newPath) => {
+                if (jsonlWatcher) jsonlWatcher.close();
+                jsonlPath = newPath;
+                jsonlPos = fs.statSync(newPath).size; // Start at end
+                entry.jsonlPath = newPath;
+                jsonlWatcher = fs.watch(jsonlPath, () => readNewLines());
+                if (ttsTap) ttsTap.sentencesSent = new Set(); // Reset dedup for new session
+                log(`Watcher switched to: ${newPath}`);
+            };
         }, 3000);
 
         // Cleanup on PTY exit
@@ -415,6 +443,8 @@ function startReader(sessionKey) {
         for (const ws of dead) {
             entry.subscribers.delete(ws);
         }
+        // PTY feed disabled — too much terminal UI noise (spinners, status bars, tips)
+        // TTS handled by feedClean via JSONL parser instead
     });
 
     ptyProc.onExit(() => {
@@ -709,6 +739,9 @@ function handleApiSessions(req, res) {
     }
 
     const sessionsList = [];
+    const starsFile = path.join(projectPath, '.tterm_session_stars.json');
+    let starredSessions = [];
+    try { starredSessions = fs.existsSync(starsFile) ? JSON.parse(fs.readFileSync(starsFile, 'utf-8')) : []; } catch(e) {}
     const files = fs.readdirSync(convDir).filter(f => f.endsWith('.jsonl'));
 
     for (const fname of files) {
@@ -717,15 +750,21 @@ function handleApiSessions(req, res) {
         const mtime = fs.statSync(fpath).mtimeMs / 1000;
         const dt = new Date(mtime * 1000);
 
-        // Get first real user message as preview (skip system tags)
+        // Get first real user message as preview + total tokens
         let preview = '';
+        let totalTokens = 0;
         try {
             const content = fs.readFileSync(fpath, 'utf-8');
             for (const line of content.split('\n')) {
                 if (!line.trim()) continue;
                 try {
                     const obj = JSON.parse(line);
-                    if (obj.type === 'user') {
+                    // Count tokens from usage data
+                    const usage = obj.message?.usage;
+                    if (usage) {
+                        totalTokens += (usage.input_tokens || 0) + (usage.output_tokens || 0);
+                    }
+                    if (!preview && obj.type === 'user') {
                         let text = '';
                         const msgContent = obj.message?.content || '';
                         if (Array.isArray(msgContent)) {
@@ -742,7 +781,6 @@ function handleApiSessions(req, res) {
                         text = text.replace(/<[^>]+>/g, '').trim();
                         if (text.length > 2) {
                             preview = text.slice(0, 100).replace(/\n/g, ' ');
-                            break;
                         }
                     }
                 } catch (e) { /* skip malformed lines */ }
@@ -761,11 +799,19 @@ function handleApiSessions(req, res) {
             time: `${hh}:${min}`,
             timestamp: mtime,
             preview,
+            tokens: totalTokens,
+            starred: starredSessions.includes(sid),
         });
     }
 
     sessionsList.sort((a, b) => b.timestamp - a.timestamp);
-    sendJson(res, { sessions: sessionsList });
+    // Include which session is currently active (locked JSONL)
+    const sessionKey = name + ':claude';
+    let activeSession = '';
+    if (activeTerminals[sessionKey] && activeTerminals[sessionKey].jsonlPath) {
+        activeSession = path.basename(activeTerminals[sessionKey].jsonlPath, '.jsonl');
+    }
+    sendJson(res, { sessions: sessionsList, activeSession });
 }
 
 function handleApiConversation(req, res) {
@@ -786,16 +832,22 @@ function handleApiConversation(req, res) {
         return;
     }
 
-    // Find most recent JSONL
+    // Use the locked JSONL path from the active session if available
     let latest = null;
-    let latestMtime = 0;
-    const files = fs.readdirSync(convDir).filter(f => f.endsWith('.jsonl'));
-    for (const fname of files) {
-        const fpath = path.join(convDir, fname);
-        const mt = fs.statSync(fpath).mtimeMs;
-        if (mt > latestMtime) {
-            latestMtime = mt;
-            latest = fpath;
+    const sessionKey = name + ':claude';
+    if (activeTerminals[sessionKey] && activeTerminals[sessionKey].jsonlPath) {
+        latest = activeTerminals[sessionKey].jsonlPath;
+    } else {
+        // Fallback: find most recent JSONL
+        let latestMtime = 0;
+        const files = fs.readdirSync(convDir).filter(f => f.endsWith('.jsonl'));
+        for (const fname of files) {
+            const fpath = path.join(convDir, fname);
+            const mt = fs.statSync(fpath).mtimeMs;
+            if (mt > latestMtime) {
+                latestMtime = mt;
+                latest = fpath;
+            }
         }
     }
 
@@ -1008,10 +1060,8 @@ function handleWebSocket(ws, req) {
         log(`New PTY: ${sessionKey} — ${remoteAddr}`);
         ws.send(JSON.stringify({ type: 'status', data: `new ${sessionType} PTY started` }));
 
-        // Claim TTS for this project (Claude sessions only)
-        if (sessionType === 'claude') {
-            claimProject(projectName);
-        }
+        // Don't claim TTS at session creation — claim happens dynamically
+        // when feedClean actually fires (only unmuted sessions with active TTSTap)
 
         // Launch claude if requested (after delay for PowerShell to fully init)
         if (autoClaude || continueClaude || resumeId) {
@@ -1109,6 +1159,60 @@ async function requestHandler(req, res) {
             await handleApiKill(req, res);
         } else if (req.method === 'GET' && pathname === '/api/sessions') {
             handleApiSessions(req, res);
+        } else if (req.method === 'GET' && pathname === '/api/load-session') {
+            // Switch which JSONL the active session reads from
+            const u = new URL(req.url, 'https://localhost');
+            const sName = u.searchParams.get('name') || '';
+            const sessionFile = u.searchParams.get('session') || '';
+            const sKey = sName + ':claude';
+            if (activeTerminals[sKey] && sessionFile) {
+                const projPath = path.join(PROJECTS_DIR, sName);
+                const cpk = projPath.replace(/\\/g, '-').replace(/\//g, '-').replace(/:/g, '-').replace(/ /g, '-');
+                const newPath = path.join(CLAUDE_PROJECTS_DIR, cpk, sessionFile + '.jsonl');
+                if (fs.existsSync(newPath)) {
+                    activeTerminals[sKey].jsonlPath = newPath;
+                    // Also switch the live JSONL watcher
+                    if (activeTerminals[sKey]._switchJsonl) {
+                        activeTerminals[sKey]._switchJsonl(newPath);
+                    }
+                    log(`Switched session JSONL for ${sName}: ${sessionFile}`);
+                }
+            }
+            sendJson(res, { ok: true });
+        } else if (req.method === 'DELETE' && pathname === '/api/session') {
+            const body = await readBody(req);
+            const { name, session } = JSON.parse(body.toString('utf-8'));
+            const projPath = path.join(PROJECTS_DIR, name);
+            const cpk = projPath.replace(/\\/g, '-').replace(/\//g, '-').replace(/:/g, '-').replace(/ /g, '-');
+            const filePath = path.join(CLAUDE_PROJECTS_DIR, cpk, session + '.jsonl');
+            // Don't delete the currently active session
+            const sKey = name + ':claude';
+            if (activeTerminals[sKey] && activeTerminals[sKey].jsonlPath === filePath) {
+                sendJson(res, { error: 'Cannot delete active session' }, 400);
+                return;
+            }
+            try {
+                if (fs.existsSync(filePath)) {
+                    fs.unlinkSync(filePath);
+                    log(`Deleted session: ${session} for ${name}`);
+                    sendJson(res, { ok: true });
+                } else {
+                    sendJson(res, { error: 'Session not found' }, 404);
+                }
+            } catch(e) { sendJson(res, { error: e.message }, 500); }
+        } else if (req.method === 'POST' && pathname === '/api/session-star') {
+            const body = await readBody(req);
+            const { name, session, starred } = JSON.parse(body.toString('utf-8'));
+            const projPath = path.join(PROJECTS_DIR, name);
+            const starsFile = path.join(projPath, '.tterm_session_stars.json');
+            try {
+                const existing = fs.existsSync(starsFile) ? JSON.parse(fs.readFileSync(starsFile, 'utf-8')) : [];
+                const idx = existing.indexOf(session);
+                if (starred && idx < 0) existing.push(session);
+                else if (!starred && idx >= 0) existing.splice(idx, 1);
+                fs.writeFileSync(starsFile, JSON.stringify(existing, null, 2));
+                sendJson(res, { ok: true, starred: !!starred });
+            } catch(e) { sendJson(res, { error: e.message }, 500); }
         } else if (req.method === 'GET' && pathname === '/api/conversation') {
             handleApiConversation(req, res);
         } else if (req.method === 'POST' && pathname === '/api/new-project') {
@@ -1241,18 +1345,9 @@ async function requestHandler(req, res) {
             const key = name + ':claude';
             if (activeTerminals[key] && activeTerminals[key].ttsTap) {
                 activeTerminals[key].ttsTap.muted = !!muted;
+                if (muted) releaseProject(name);
                 log(`TTS ${muted ? 'muted' : 'unmuted'}: ${name}`);
             }
-            // Also tell TTS server to mute/unmute this project
-            const muteProject = name.replace(/ /g, '-');
-            try {
-                const muteData = JSON.stringify({ project: muteProject, muted: !!muted });
-                const muteReq = http.request({ hostname: '127.0.0.1', port: 7123, path: '/project-voice', method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(muteData) },
-                }, () => {});
-                muteReq.on('error', () => {});
-                muteReq.end(muteData);
-            } catch(e) {}
             sendJson(res, { ok: true, muted: !!muted });
         } else if (req.method === 'GET' && pathname === '/api/favorites') {
             try {

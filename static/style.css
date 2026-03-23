@@ -607,6 +607,8 @@ body.no-intro .all-projects-btn { animation:none !important; }
 }
 .tab-item:hover { background:var(--glass-hover); }
 .tab-item.active { border-bottom-color:var(--accent); background:rgba(2,132,199,0.04); }
+.tab-item.dragging { opacity:0.4; }
+.tab-item.drag-over { border-left:2px solid var(--accent2); }
 .tab-color {
   width:3px; height:18px; border-radius:2px;
   flex-shrink:0;
@@ -1785,3 +1787,47 @@ body.show-stats .gs-toggle { opacity:1; color:var(--accent2); }
   cursor:pointer; transition:all 0.15s;
 }
 .qa-pill:hover { border-color:var(--accent-border); color:var(--text2); }
+
+/* ═══════════════ Confirm Modal ═══════════════ */
+.tterm-modal-overlay {
+  position:fixed; inset:0; z-index:9999;
+  background:rgba(0,0,0,0.5); backdrop-filter:blur(8px);
+  display:flex; align-items:center; justify-content:center;
+  animation:modalFadeIn 0.2s ease;
+}
+@keyframes modalFadeIn { from { opacity:0; } to { opacity:1; } }
+.tterm-modal {
+  background:rgba(10,10,15,0.85); backdrop-filter:blur(20px);
+  border:1px solid var(--glass-border);
+  border-radius:12px; padding:24px 28px;
+  min-width:300px; max-width:400px;
+  box-shadow:0 16px 48px rgba(0,0,0,0.5);
+  animation:modalSlideIn 0.25s ease;
+}
+@keyframes modalSlideIn { from { opacity:0; transform:translateY(10px) scale(0.97); } to { opacity:1; transform:translateY(0) scale(1); } }
+.tterm-modal-title {
+  font-family:var(--font-mono); font-size:12px; font-weight:600;
+  color:var(--text1); margin-bottom:8px; letter-spacing:0.5px;
+}
+.tterm-modal-body {
+  font-family:var(--font-mono); font-size:11px;
+  color:var(--text3); line-height:1.5; margin-bottom:20px;
+}
+.tterm-modal-actions {
+  display:flex; gap:8px; justify-content:flex-end;
+}
+.tterm-modal-btn {
+  font-family:var(--font-mono); font-size:10px; font-weight:500;
+  padding:6px 16px; border-radius:6px; cursor:pointer;
+  border:1px solid var(--glass-border); background:var(--glass-bg);
+  color:var(--text2); transition:all 0.15s; letter-spacing:0.3px;
+}
+.tterm-modal-btn:hover { background:var(--glass-hover); color:var(--text1); border-color:var(--accent-border); }
+.tterm-modal-btn.primary {
+  background:var(--accent2); color:#000; border-color:var(--accent2);
+}
+.tterm-modal-btn.primary:hover { filter:brightness(1.15); }
+.tterm-modal-btn.danger {
+  background:rgba(220,50,50,0.15); color:#e04040; border-color:rgba(220,50,50,0.3);
+}
+.tterm-modal-btn.danger:hover { background:rgba(220,50,50,0.25); }

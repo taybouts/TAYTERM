@@ -23,11 +23,13 @@ let currentPage = 0;
 //  Session persistence (localStorage)
 // ══════════════════════════════════════════
 function saveState() {
+  // Save tab order by name (IDs change across sessions)
+  const orderedNames = tabOrder.map(id => sessions[id]?.name).filter(Boolean);
   const tabs = Object.values(sessions).map(s => ({ name: s.name, isShell: s.isShell, muted: s.muted || false }));
   const active = activeSessionId ? sessions[activeSessionId]?.name : null;
   // Save pane assignments by name (IDs change across sessions)
   const panes = paneSlots.map(id => id && sessions[id] ? sessions[id].name : null);
-  localStorage.setItem('tterm_tabs', JSON.stringify({ tabs, active, layout, panes }));
+  localStorage.setItem('tterm_tabs', JSON.stringify({ tabs, active, layout, panes, tabOrder: orderedNames }));
 }
 
 function loadState() {
@@ -855,16 +857,35 @@ function closeSession(id) {
 // ══════════════════════════════════════════
 //  Tabs
 // ══════════════════════════════════════════
+let tabOrder = []; // Ordered session IDs for tab strip
+
+function getOrderedSessionIds() {
+  const allIds = Object.keys(sessions);
+  // Keep existing order, append new tabs at end
+  const ordered = tabOrder.filter(id => allIds.includes(id));
+  for (const id of allIds) {
+    if (!ordered.includes(id)) ordered.push(id);
+  }
+  tabOrder = ordered;
+  return ordered;
+}
+
 function renderTabs() {
   const strip = document.getElementById('tab-strip');
   strip.innerHTML = '';
   const muteIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>';
   const speakerIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>';
   const closeIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
-  for (const [id, s] of Object.entries(sessions)) {
+  const orderedIds = getOrderedSessionIds();
+  let dragSrcId = null;
+  for (const id of orderedIds) {
+    const s = sessions[id];
+    if (!s) continue;
     const tabColor = s.isShell ? '#38bdf8' : getProjectColor(s.name);
     const tab = document.createElement('div');
     tab.className = 'tab-item' + (id === activeSessionId ? ' active' : '') + (s.speaking ? ' speaking' : '');
+    tab.draggable = true;
+    tab.dataset.tabId = id;
     tab.innerHTML =
       '<div class="tab-color" style="background:' + tabColor + '"></div>' +
       (s.isShell ? '<span class="tab-sh-badge">SH</span>' : '') +
@@ -875,6 +896,35 @@ function renderTabs() {
     if (!s.isShell) {
       tab.oncontextmenu = (e) => { e.preventDefault(); showTabMenu(id, e); };
     }
+    // Drag and drop
+    tab.addEventListener('dragstart', (e) => {
+      dragSrcId = id;
+      tab.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+    });
+    tab.addEventListener('dragend', () => {
+      tab.classList.remove('dragging');
+      strip.querySelectorAll('.tab-item').forEach(t => t.classList.remove('drag-over'));
+    });
+    tab.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      strip.querySelectorAll('.tab-item').forEach(t => t.classList.remove('drag-over'));
+      if (id !== dragSrcId) tab.classList.add('drag-over');
+    });
+    tab.addEventListener('drop', (e) => {
+      e.preventDefault();
+      if (dragSrcId && dragSrcId !== id) {
+        const fromIdx = tabOrder.indexOf(dragSrcId);
+        const toIdx = tabOrder.indexOf(id);
+        if (fromIdx >= 0 && toIdx >= 0) {
+          tabOrder.splice(fromIdx, 1);
+          tabOrder.splice(toIdx, 0, dragSrcId);
+          renderTabs();
+          saveState();
+        }
+      }
+    });
     strip.appendChild(tab);
   }
   const addBtn = document.createElement('button');
@@ -930,7 +980,7 @@ function showTabMenu(sessionId, event) {
       fetch(TTS_BASE + '/project-voice', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({project: s.name, voice: v})
+        body: JSON.stringify({project: s.name.replace(/ /g, '-'), voice: v})
       }).catch(() => {});
       closeTabMenu();
     };
@@ -956,6 +1006,34 @@ function showTabMenu(sessionId, event) {
 function closeTabMenu() {
   const existing = document.querySelector('.tab-menu');
   if (existing) existing.remove();
+}
+
+function showModal(title, body, actions) {
+  const overlay = document.createElement('div');
+  overlay.className = 'tterm-modal-overlay';
+  const modal = document.createElement('div');
+  modal.className = 'tterm-modal';
+  const titleEl = document.createElement('div');
+  titleEl.className = 'tterm-modal-title';
+  titleEl.textContent = title;
+  modal.appendChild(titleEl);
+  const bodyEl = document.createElement('div');
+  bodyEl.className = 'tterm-modal-body';
+  bodyEl.textContent = body;
+  modal.appendChild(bodyEl);
+  const actionsEl = document.createElement('div');
+  actionsEl.className = 'tterm-modal-actions';
+  for (const a of actions) {
+    const btn = document.createElement('button');
+    btn.className = 'tterm-modal-btn' + (a.class ? ' ' + a.class : '');
+    btn.textContent = a.label;
+    btn.onclick = () => { overlay.remove(); if (a.action) a.action(); };
+    actionsEl.appendChild(btn);
+  }
+  modal.appendChild(actionsEl);
+  overlay.appendChild(modal);
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  document.body.appendChild(overlay);
 }
 
 function toggleMute(id) {
@@ -1003,6 +1081,8 @@ function switchTab(id) {
   }
   saveState();
   loadStats(id);
+  // Refresh side tray panel if open (so it shows data for the new active session)
+  if (activeTrayPanel) renderTrayPanel(activeTrayPanel);
 }
 
 // ══════════════════════════════════════════
@@ -1048,6 +1128,12 @@ function setViewMode(mode) {
 
 function renderSplitView() {
   const sv = document.getElementById('splitView');
+  // Save scroll positions before destroying
+  sv.querySelectorAll('.messenger-split-pane').forEach(p => {
+    const chat = p.querySelector('.chat-messages');
+    const psid = p.dataset.sessionId;
+    if (chat && psid) savedScrollPositions[psid] = chat.scrollTop;
+  });
   sv.innerHTML = '';
   const sid = activeSessionId || paneSlots[0];
   if (!sid || !sessions[sid]) return;
@@ -1114,7 +1200,14 @@ function renderSplitView() {
       if (m.type === 'image') chatArea.appendChild(createImageBubble(m.role, m.blobUrl, m.time, null, m.ts));
       else chatArea.appendChild(createMsgBubble(m.role, m.text, m.time));
     }
-    setTimeout(() => { chatArea.scrollTop = chatArea.scrollHeight; }, 50);
+    // Restore scroll: locked to bottom → snap to bottom, scrolled up → restore position
+    setTimeout(() => {
+      if (scrollLockedToBottom[sid] === false && savedScrollPositions[sid] !== undefined) {
+        chatArea.scrollTop = savedScrollPositions[sid];
+      } else {
+        chatArea.scrollTop = chatArea.scrollHeight;
+      }
+    }, 50);
   }
   sv.appendChild(left);
 
@@ -1141,9 +1234,20 @@ function renderSplitView() {
 
 let selectedMessengerPane = 0;
 const cachedPanes = {}; // { sessionId: DOM element }
+const savedScrollPositions = {}; // { sessionId: scrollTop }
+const scrollLockedToBottom = {}; // { sessionId: boolean }
 
 function createMessengerPane(sid, paneIdx, totalPanes) {
-  // Return cached pane if it exists
+  // Check if cached pane is stale (messages added while off-screen)
+  if (sid && cachedPanes[sid] && messengerMessages[sid]) {
+    const chatArea = cachedPanes[sid].querySelector('.chat-messages');
+    const rendered = chatArea ? chatArea.querySelectorAll('.msg-bubble').length : 0;
+    if (rendered !== messengerMessages[sid].length) {
+      delete cachedPanes[sid]; // Stale — force full recreation
+    }
+  }
+
+  // Return cached pane if it exists and is fresh
   if (sid && cachedPanes[sid]) {
     const cached = cachedPanes[sid];
     cached.className = 'messenger-split-pane' + (totalPanes > 1 && paneIdx === selectedMessengerPane ? ' selected' : '');
@@ -1204,11 +1308,12 @@ function createMessengerPane(sid, paneIdx, totalPanes) {
   const scrollBtn = document.createElement('button');
   scrollBtn.className = 'chat-scroll-btn';
   scrollBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="6 9 12 15 18 9"/></svg>';
-  scrollBtn.onclick = () => { chatArea.scrollTop = chatArea.scrollHeight; };
+  scrollBtn.onclick = () => { chatArea.scrollTop = chatArea.scrollHeight; if (sid) scrollLockedToBottom[sid] = true; };
   chatWrap.appendChild(scrollBtn);
   chatArea.addEventListener('scroll', () => {
     const atBottom = chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight < 50;
     scrollBtn.classList.toggle('visible', !atBottom);
+    if (sid) scrollLockedToBottom[sid] = atBottom;
   });
   pane.appendChild(chatWrap);
 
@@ -1332,6 +1437,8 @@ function createMessengerPane(sid, paneIdx, totalPanes) {
     }
     setTimeout(() => { chatArea.scrollTop = chatArea.scrollHeight; }, 50);
   }
+  // Default: locked to bottom on first creation
+  if (sid && scrollLockedToBottom[sid] === undefined) scrollLockedToBottom[sid] = true;
 
   // Restore thinking indicator if session is still thinking
   if (sid && sessions[sid]?.isThinking) {
@@ -1346,10 +1453,11 @@ function createMessengerPane(sid, paneIdx, totalPanes) {
 
 function renderMessenger() {
   const mp = document.getElementById('messengerPane');
-  // Save scroll positions onto cached elements before detaching
+  // Save scroll positions by session ID before detaching
   mp.querySelectorAll('.messenger-split-pane').forEach(p => {
     const chat = p.querySelector('.chat-messages');
-    if (chat) p.dataset.savedScroll = chat.scrollTop;
+    const sid = p.dataset.sessionId;
+    if (chat && sid) savedScrollPositions[sid] = chat.scrollTop;
   });
   // Detach children (don't destroy — they're cached)
   while (mp.firstChild) mp.removeChild(mp.firstChild);
@@ -1396,16 +1504,23 @@ function renderMessenger() {
       showMessengerTyping(sid, true);
     }
   }
-  // Restore scroll positions after layout settles
-  setTimeout(() => {
-    mp.querySelectorAll('.messenger-split-pane').forEach(p => {
-      const chat = p.querySelector('.chat-messages');
-      if (chat && p.dataset.savedScroll) {
-        chat.scrollTop = parseInt(p.dataset.savedScroll);
-        delete p.dataset.savedScroll;
-      }
-    });
-  }, 20);
+  // Restore scroll positions after layout settles (rAF + timeout for reliable layout)
+  requestAnimationFrame(() => {
+    setTimeout(() => {
+      mp.querySelectorAll('.messenger-split-pane').forEach(p => {
+        const chat = p.querySelector('.chat-messages');
+        const sid = p.dataset.sessionId;
+        if (!chat || !sid) return;
+        if (scrollLockedToBottom[sid]) {
+          // Was following chat — snap to bottom (catches new messages while away)
+          chat.scrollTop = chat.scrollHeight;
+        } else if (savedScrollPositions[sid] !== undefined) {
+          // Was scrolled up — restore exact position
+          chat.scrollTop = savedScrollPositions[sid];
+        }
+      });
+    }, 0);
+  });
 }
 
 function isImagePath(text) {
@@ -1715,8 +1830,14 @@ function renderTrayPanel(panel) {
     }
   } else if (panel === 'sessions') {
     setHeader('Sessions');
+    if (!window._sessionsCache) window._sessionsCache = {};
     if (activeSessionId && sessions[activeSessionId]) {
       const name = sessions[activeSessionId].name;
+      // Return cached DOM if we have it for this project
+      if (window._sessionsCache[name]) {
+        content.appendChild(window._sessionsCache[name]);
+        return;
+      }
       content.innerHTML = '<div style="padding:12px;text-align:center;font-family:var(--font-mono);font-size:10px;color:var(--text3)">Loading...</div>';
       fetch('/api/sessions?name=' + encodeURIComponent(name))
         .then(r => r.json())
@@ -1727,14 +1848,110 @@ function renderTrayPanel(panel) {
             content.innerHTML = '<div style="padding:20px;text-align:center;font-family:var(--font-mono);font-size:11px;color:var(--text3)">No sessions found</div>';
             return;
           }
+          const activeJsonl = data.activeSession || '';
+          const wrapper = document.createElement('div');
           for (let i = 0; i < list.length; i++) {
             const s = list[i];
             const card = document.createElement('div');
-            card.className = 'flag-card session-card';
-            card.innerHTML = '<div class="flag-card-text">' + (s.preview || '<em style="opacity:0.4">No preview</em>') + '</div>'
-              + '<div class="flag-card-time">' + s.date + ' · ' + s.time + (i === 0 ? ' · <span style="color:var(--accent2)">latest</span>' : '') + '</div>';
-            content.appendChild(card);
+            const isActive = s.id === activeJsonl;
+            card.className = 'flag-card session-card' + (isActive ? ' active' : '') + (s.starred ? ' starred' : '');
+            card.style.cursor = 'pointer';
+            if (isActive) card.style.borderLeft = '2px solid var(--accent2)';
+            if (s.starred) card.style.borderLeft = '2px solid var(--accent3, #f5a623)';
+            if (isActive && s.starred) card.style.borderLeft = '2px solid var(--accent2)';
+            const tokenInfo = s.tokens ? ' · ' + (s.tokens > 1000 ? Math.round(s.tokens/1000) + 'k' : s.tokens) + ' tok' : '';
+            const starIcon = s.starred ? '<span style="color:var(--accent3, #f5a623);margin-right:4px">&#9733;</span>' : '';
+            card.innerHTML = '<div class="flag-card-text">' + starIcon + (s.preview || '<em style="opacity:0.4">No preview</em>') + '</div>'
+              + '<div class="flag-card-time">' + s.date + ' · ' + s.time + tokenInfo + (isActive ? ' · <span style="color:var(--accent2)">active</span>' : (i === 0 ? ' · <span style="color:var(--accent2)">latest</span>' : '')) + '</div>'
+              + '<div class="session-actions" style="display:flex;gap:4px;margin-top:4px">'
+              + '<button class="session-resume-btn" style="font-size:9px;padding:2px 6px;background:var(--accent2);color:#000;border:none;border-radius:3px;cursor:pointer">Resume</button>'
+              + '<button class="session-delete-btn" style="font-size:9px;padding:2px 6px;background:transparent;color:var(--text3);border:1px solid var(--text3);border-radius:3px;cursor:pointer">Delete</button>'
+              + '</div>';
+            // Single click — browse conversation
+            card.onclick = (e) => {
+              if (e.target.closest('.session-actions')) return;
+              const sid = activeSessionId;
+              if (sid && sessions[sid]) {
+                delete messengerMessages[sid];
+                delete cachedPanes[sid];
+                fetch('/api/load-session?name=' + encodeURIComponent(name) + '&session=' + encodeURIComponent(s.id))
+                  .then(() => renderMessenger());
+                wrapper.querySelectorAll('.session-card').forEach(c => {
+                  c.classList.remove('active');
+                  if (!c.classList.contains('starred')) c.style.borderLeft = '';
+                });
+                card.classList.add('active');
+                card.style.borderLeft = '2px solid var(--accent2)';
+              }
+            };
+            // Right-click — toggle favorite
+            card.oncontextmenu = (e) => {
+              e.preventDefault();
+              s.starred = !s.starred;
+              card.classList.toggle('starred', s.starred);
+              if (s.starred) {
+                card.style.borderLeft = '2px solid var(--accent3, #f5a623)';
+                card.querySelector('.flag-card-text').insertAdjacentHTML('afterbegin', '<span style="color:var(--accent3, #f5a623);margin-right:4px">&#9733;</span>');
+              } else {
+                card.style.borderLeft = card.classList.contains('active') ? '2px solid var(--accent2)' : '';
+                const star = card.querySelector('.flag-card-text span');
+                if (star) star.remove();
+              }
+              fetch('/api/session-star', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ name, session: s.id, starred: s.starred })
+              }).catch(() => {});
+            };
+            // Resume button
+            card.querySelector('.session-resume-btn').onclick = (e) => {
+              e.stopPropagation();
+              showModal('Resume Session', 'This will exit the current Claude conversation and resume the selected session.', [
+                { label: 'Cancel' },
+                { label: 'Resume', class: 'primary', action: () => {
+                  const sid = activeSessionId;
+                  if (sid && sessions[sid] && sessions[sid].ws && sessions[sid].ws.readyState === WebSocket.OPEN) {
+                    sessions[sid].ws.send(JSON.stringify({ type: 'input', data: '/exit\r' }));
+                    setTimeout(() => {
+                      sessions[sid].ws.send(JSON.stringify({ type: 'input', data: 'claude --resume ' + s.id + '\r' }));
+                    }, 1500);
+                    delete messengerMessages[sid];
+                    delete cachedPanes[sid];
+                    fetch('/api/load-session?name=' + encodeURIComponent(name) + '&session=' + encodeURIComponent(s.id))
+                      .then(() => setTimeout(() => renderMessenger(), 2000));
+                  }
+                }}
+              ]);
+            };
+            // Delete button
+            card.querySelector('.session-delete-btn').onclick = (e) => {
+              e.stopPropagation();
+              if (isActive) {
+                showModal('Cannot Delete', 'This is the active session. Switch to a different session before deleting.', [
+                  { label: 'OK', class: 'primary' }
+                ]);
+                return;
+              }
+              showModal('Delete Session', 'This will permanently delete this conversation. This cannot be undone.', [
+                { label: 'Cancel' },
+                { label: 'Delete', class: 'danger', action: () => {
+                  fetch('/api/session', {
+                    method: 'DELETE',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ name, session: s.id })
+                  }).then(r => r.json()).then(d => {
+                    if (d.ok) {
+                      card.remove();
+                      delete window._sessionsCache[name];
+                    }
+                  }).catch(() => {});
+                }}
+              ]);
+            };
+            wrapper.appendChild(card);
           }
+          window._sessionsCache[name] = wrapper;
+          content.appendChild(wrapper);
         }).catch(() => {
           content.innerHTML = '<div style="padding:20px;text-align:center;font-family:var(--font-mono);font-size:11px;color:var(--text3)">Failed to load sessions</div>';
         });
@@ -1970,7 +2187,9 @@ function addMessengerImage(sessionId, role, blobUrl, filePath, imageSize, mediaT
     const chatArea = pane.querySelector('.chat-messages');
     if (!chatArea) continue;
     chatArea.appendChild(createImageBubble(role, blobUrl, time, sizeInfo, ts));
-    chatArea.scrollTop = chatArea.scrollHeight;
+    if (scrollLockedToBottom[pane.dataset.sessionId] !== false) {
+      chatArea.scrollTop = chatArea.scrollHeight;
+    }
   }
 }
 
@@ -2028,7 +2247,10 @@ function addMessengerMessage(sessionId, role, text, extra) {
     } else {
       chatArea.appendChild(bubble);
     }
-    chatArea.scrollTop = chatArea.scrollHeight;
+    // Only auto-scroll if user is locked to bottom (following chat)
+    if (scrollLockedToBottom[paneSid] !== false) {
+      chatArea.scrollTop = chatArea.scrollHeight;
+    }
   }
 }
 
@@ -2622,6 +2844,10 @@ document.addEventListener('drop', (e) => {
         }
       }
       renderPanes();
+    }
+    // Restore tab order
+    if (saved.tabOrder && saved.tabOrder.length > 0) {
+      tabOrder = saved.tabOrder.map(name => Object.keys(sessions).find(k => sessions[k].name === name)).filter(Boolean);
     }
     if (saved.active) {
       const id = Object.keys(sessions).find(k => sessions[k].name === saved.active);
