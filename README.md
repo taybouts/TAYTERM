@@ -102,9 +102,14 @@ Paste or capture a screenshot — it appears as an inline image bubble. Click to
 
 ## Architecture
 
+### Three-Process Model (v1.0.0+)
+
 ```
-server.js              Node.js backend — PTY, WebSocket, JSONL watcher, TTS
-auth.js                Auth system — QR, passkeys, admin, whitelist, audit
+pty-daemon.js          PTY Daemon — owns all terminal processes (port 7779)
+                       Dashboard at port 7780
+server.js              T-Term Server — WebSocket bridge, JSONL watcher, TTS (port 7778)
+auth.js                Auth system — QR, passkeys, admin, whitelist, audit, email invites
+pty-client.js          CLI tool — attach any terminal to a daemon PTY
 static/index.html      Single-page app shell
 static/app.js          Frontend — messenger, terminal, mobile, pane management
 static/style.css       Design system (blue flavor)
@@ -114,13 +119,23 @@ tterm_tray.pyw         System tray launcher
 ### Data Flow
 
 ```
-Claude Code CLI → writes JSONL → server.js watches file
-                                    ├── WebSocket → Desktop messenger
-                                    ├── WebSocket → Mobile PWA
-                                    └── TTSTap → NaturalVoice TTS
+PTY Daemon (port 7779)
+    ├── owns PTY processes (survives server restarts)
+    ├── 64KB scrollback buffer per session
+    └── TCP protocol (NDJSON: spawn/attach/write/resize/kill)
 
-Browser ← WebSocket ← PTY raw output (terminal view)
+T-Term Server (port 7778)
+    ├── connects to daemon as TCP client
+    ├── bridges WebSocket ↔ daemon PTY I/O
+    ├── watches JSONL files (fs.watch on directory)
+    │       ├── WebSocket → Desktop messenger
+    │       ├── WebSocket → Mobile PWA
+    │       └── TTSTap → NaturalVoice TTS
+    └── recoverDaemonSessions() on startup
+
+Browser ← WebSocket ← PTY raw output (terminal view, via daemon)
 Browser ← WebSocket ← JSONL parsed (messenger view)
+Browser → WebSocket → daemon PTY (user input)
 ```
 
 ### Routing
@@ -149,7 +164,7 @@ Part of the **T-Server** ecosystem. Shares the design language with T-Legal, T-V
 ## Features
 
 ### Terminal
-- Persistent PTY sessions — survive browser disconnect
+- Persistent PTY sessions — survive browser disconnect AND server restarts (via PTY daemon)
 - Multi-device sync — multiple browsers on the same PTY
 - Split panes — single, horizontal, vertical, triple, quad
 - Tab management with color bars, mute, close
@@ -235,7 +250,9 @@ Part of the **T-Server** ecosystem. Shares the design language with T-Legal, T-V
 | `/admin/invite-create` | POST | Generate invite link |
 | `/admin/invites` | GET | List all invites |
 | `/admin/invite-revoke` | POST | Revoke a pending invite |
-| `/ws` | WebSocket | PTY + JSONL stream |
+| `/api/daemon` | GET | Daemon status + active PTY sessions |
+| `/api/new-session` | POST | Send /clear to PTY, reset JSONL watcher |
+| `/ws` | WebSocket | PTY + JSONL stream (via daemon) |
 
 ---
 
@@ -261,8 +278,15 @@ openssl req -x509 -newkey rsa:2048 -keyout .tayterm_key.pem -out .tayterm_cert.p
 # Quick start (tray app)
 pythonw tterm_tray.pyw
 
-# Or direct
+# Or direct — server auto-starts the PTY daemon
 node server.js
+
+# Daemon only (runs independently)
+node pty-daemon.js
+
+# Attach any terminal to a daemon PTY
+node pty-client.js list
+node pty-client.js attach TAYTERM:claude
 ```
 
 Open `https://localhost:7778`

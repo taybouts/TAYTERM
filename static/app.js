@@ -357,6 +357,25 @@ async function confirmNewSession(name) {
   showConfirm('Start a fresh Claude session?', () => openSession(name, false));
 }
 
+function startNewSessionInPlace(sessionId) {
+  const s = sessions[sessionId];
+  if (!s || s.isShell) return;
+  showConfirm('Start a new session? (sends /clear)', () => {
+    // Clear messenger
+    delete messengerMessages[sessionId];
+    delete cachedPanes[sessionId];
+    messengerMessages[sessionId] = [];
+    renderMessenger();
+
+    // Tell server to send /clear and reset JSONL watcher
+    fetch('/api/new-session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: s.name })
+    }).catch(() => {});
+  });
+}
+
 function showConfirm(msg, onYes, yesLabel, onAlt, altLabel) {
   document.getElementById('confirm-msg').textContent = msg;
   const yes = document.getElementById('confirm-yes');
@@ -600,8 +619,8 @@ function _doOpenSession(name, isShell, continueFlag, resumeId, id) {
 
   // Connect WebSocket
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const params = 'project=' + encodeURIComponent(name) + (isShell ? '' : resumeId ? '&resume=' + resumeId : continueFlag ? '&continue=1' : '&claude=1');
-  const ws = new WebSocket(proto + '//' + location.host + '/ws?' + params);
+  let params = 'project=' + encodeURIComponent(name) + (isShell ? '' : resumeId ? '&resume=' + resumeId : continueFlag ? '&continue=1' : '&claude=1');
+  let ws = new WebSocket(proto + '//' + location.host + '/ws?' + params);
 
   let loaderDismissed = false;
   function dismissLoader() {
@@ -627,7 +646,7 @@ function _doOpenSession(name, isShell, continueFlag, resumeId, id) {
     }
   };
 
-  ws.onmessage = (e) => {
+  function handleWsMessage(e) {
     try {
       const msg = JSON.parse(e.data);
       if (msg.type === 'output') {
@@ -695,9 +714,31 @@ function _doOpenSession(name, isShell, continueFlag, resumeId, id) {
         updateInfoPanel(id, msg);
       }
     } catch(err) {}
-  };
+  }
 
-  ws.onclose = () => {};
+  function handleWsClose() {
+    // Auto-reconnect if session still exists (not intentionally closed)
+    if (!sessions[id]) return;
+    sessions[id]._reconnecting = true;
+    renderTabs();
+    // Reconnect as continue — server restart means PTY died, we want to resume
+    const rParams = 'project=' + encodeURIComponent(name) + (isShell ? '' : '&continue=1');
+    const newWs = new WebSocket(proto + '//' + location.host + '/ws?' + rParams);
+    newWs.onopen = () => {
+      ws = newWs;
+      sessions[id].ws = newWs;
+      sessions[id]._reconnecting = false;
+      renderTabs();
+      const dims = fitAddon.proposeDimensions() || { cols: 120, rows: 30 };
+      newWs.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
+    };
+    newWs.onmessage = handleWsMessage;
+    newWs.onclose = handleWsClose;
+    newWs.onerror = () => {};
+  }
+
+  ws.onmessage = handleWsMessage;
+  ws.onclose = handleWsClose;
 
   term.onData(data => {
     if (ws.readyState === WebSocket.OPEN) {
@@ -988,16 +1029,33 @@ function showTabMenu(sessionId, event) {
   });
   dd.appendChild(voiceList);
 
-  // Close session
+  // New session (mid-session clear)
   const sep2 = document.createElement('div');
   sep2.className = 'tab-menu-sep';
   dd.appendChild(sep2);
 
-  const closeBtn = document.createElement('button');
-  closeBtn.className = 'tab-menu-item danger';
-  closeBtn.textContent = 'Close Session';
-  closeBtn.onclick = () => { closeSession(sessionId); closeTabMenu(); };
-  dd.appendChild(closeBtn);
+  const newBtn = document.createElement('button');
+  newBtn.className = 'tab-menu-item';
+  newBtn.textContent = 'New Session';
+  newBtn.onclick = () => { startNewSessionInPlace(sessionId); closeTabMenu(); };
+  dd.appendChild(newBtn);
+
+  // Close & Kill
+  const killBtn = document.createElement('button');
+  killBtn.className = 'tab-menu-item danger';
+  killBtn.textContent = 'Close & Kill';
+  killBtn.onclick = () => {
+    const s = sessions[sessionId];
+    if (!s) return;
+    fetch('/api/kill', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: s.name })
+    }).catch(() => {});
+    closeSession(sessionId);
+    closeTabMenu();
+  };
+  dd.appendChild(killBtn);
 
   document.body.appendChild(dd);
   setTimeout(() => document.addEventListener('click', closeTabMenu, { once: true }), 0);
@@ -1163,8 +1221,12 @@ function renderSplitView() {
   const sendMsg = () => {
     const text = textarea.value.trim();
     const atts = pendingAttachments[sid] || [];
-    if (!text && atts.length === 0) return;
     const ws = s.ws;
+    if (!text && atts.length === 0) {
+      // Empty enter — send \r to submit whatever is in the terminal input line
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'input', data: '\r' }));
+      return;
+    }
     if (ws.readyState === WebSocket.OPEN) {
       // Send pending attachments first
       if (atts.length > 0) {
@@ -1375,8 +1437,12 @@ function createMessengerPane(sid, paneIdx, totalPanes) {
   const sendMsg = () => {
     const text = textarea.value.trim();
     const atts = pendingAttachments[sid] || [];
-    if ((!text && atts.length === 0) || !sid || !sessions[sid]) return;
+    if (!sid || !sessions[sid]) return;
     const ws = sessions[sid].ws;
+    if (!text && atts.length === 0) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'input', data: '\r' }));
+      return;
+    }
     if (ws.readyState === WebSocket.OPEN) {
       if (atts.length > 0) {
         const paths = atts.map(a => a.path).join(' ');
@@ -1592,10 +1658,21 @@ function renderMarkdown(text) {
   html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
   // Inline code
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+  // Headers (h1-h4)
+  html = html.replace(/^####\s+(.+)$/gm, '<h4 class="md-h">$1</h4>');
+  html = html.replace(/^###\s+(.+)$/gm, '<h3 class="md-h">$1</h3>');
+  html = html.replace(/^##\s+(.+)$/gm, '<h2 class="md-h">$1</h2>');
+  html = html.replace(/^#\s+(.+)$/gm, '<h1 class="md-h">$1</h1>');
   // Bold
   html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   // Italic
   html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  // Markdown links [text](url)
+  html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener" class="md-link">$1</a>');
+  // Bare URLs (not already inside an href)
+  html = html.replace(/(?<!href="|">)(https?:\/\/[^\s<)"]+)/g, '<a href="$1" target="_blank" rel="noopener" class="md-link">$1</a>');
+  // Rewrite localhost URLs to use actual server hostname (so links work from mobile)
+  html = html.replace(/href="(https?):\/\/localhost(:\d+)?/g, 'href="$1://' + window.location.hostname + '$2');
   // Tables: detect lines with | separators
   html = html.replace(/((?:^\|.+\|$\n?)+)/gm, (match) => {
     const rows = match.trim().split('\n').filter(r => r.trim());
@@ -1629,6 +1706,9 @@ function renderMarkdown(text) {
   html = html.replace(/<\/tr><br>/g, '</tr>');
   html = html.replace(/<table><br>/g, '<table>');
   html = html.replace(/<br><\/table>/g, '</table>');
+  // Clean up <br> around headers
+  html = html.replace(/<br><(h[1-4])/g, '<$1');
+  html = html.replace(/<\/(h[1-4])><br>/g, '</$1>');
   return html;
 }
 
@@ -1639,6 +1719,13 @@ function createMsgBubble(role, text, time, extra) {
   bubble.className = 'msg-bubble';
   if (role === 'assistant') {
     bubble.innerHTML = renderMarkdown(text);
+    // Read-aloud overlay button — top-right corner, visible on hover
+    const readBtn = document.createElement('div');
+    readBtn.className = 'bubble-read-btn';
+    readBtn.title = 'Read aloud';
+    readBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
+    readBtn.onclick = (e) => { e.stopPropagation(); readBubbleAloud(text, readBtn); };
+    bubble.appendChild(readBtn);
   } else {
     bubble.textContent = text;
   }
@@ -1680,6 +1767,18 @@ function createMsgBubble(role, text, time, extra) {
     });
   }
   return msg;
+}
+
+function readBubbleAloud(text, btn) {
+  // Visual feedback
+  btn.classList.add('reading');
+  setTimeout(() => btn.classList.remove('reading'), 2000);
+  // Send to TTS server
+  fetch(TTS_BASE + '/speak', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text })
+  }).catch(() => {});
 }
 
 // ══════════════════════════════════════════
@@ -2043,6 +2142,18 @@ function renderTrayPanel(panel) {
           card.className = 'flag-card note-card';
           card.innerHTML = '<div class="flag-card-text">' + n.text + '</div>'
             + '<div class="flag-card-time">' + (n.date || '') + ' · ' + (n.time || '') + '</div>';
+          card.querySelector('.flag-card-text').onclick = (e) => { e.stopPropagation(); e.target.classList.toggle('expanded'); };
+          const copyBtn = document.createElement('button');
+          copyBtn.className = 'note-copy';
+          copyBtn.innerHTML = '&#x2398;';
+          copyBtn.title = 'Copy';
+          copyBtn.onclick = (e) => {
+            e.stopPropagation();
+            navigator.clipboard.writeText(n.text);
+            copyBtn.innerHTML = '&#x2713;';
+            setTimeout(() => { copyBtn.innerHTML = '&#x2398;'; }, 1000);
+          };
+          card.appendChild(copyBtn);
           const delBtn = document.createElement('button');
           delBtn.className = 'note-delete';
           delBtn.innerHTML = '&times;';
@@ -2131,9 +2242,10 @@ function createImageBubble(role, blobUrl, time, sizeInfo, ts) {
   const img = document.createElement('img');
   img.src = blobUrl;
   img.onload = () => {
-    // Scroll after image loads
     const chatArea = msg.closest('.chat-messages');
-    if (chatArea) chatArea.scrollTop = chatArea.scrollHeight;
+    const pane = msg.closest('.messenger-split-pane, .split-messenger');
+    const sid = pane?.dataset?.sessionId;
+    if (chatArea && scrollLockedToBottom[sid] !== false) chatArea.scrollTop = chatArea.scrollHeight;
   };
   img.onclick = () => {
     const viewer = document.createElement('div');
@@ -2319,7 +2431,7 @@ function showMessengerTyping(sessionId, show, tools, agents) {
         }
         html += '</div>';
         existing.innerHTML = html;
-        chatArea.scrollTop = chatArea.scrollHeight;
+        if (scrollLockedToBottom[sessionId] !== false) chatArea.scrollTop = chatArea.scrollHeight;
       } else if (!show && existing) {
         existing.remove();
       }

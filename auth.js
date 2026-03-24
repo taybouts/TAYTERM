@@ -9,7 +9,99 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
 const QRCode = require('qrcode');
+
+// ---------------------------------------------------------------------------
+//  Resend Email Integration
+// ---------------------------------------------------------------------------
+const RESEND_API_KEY = 're_UV4AqZgv_FyN3HbAyopoMzYptbDvtLk1Z';
+const RESEND_FROM = 'T-Term <register@taybouts.com>';
+
+function sendInviteEmail(toEmail, inviteLink) {
+    const html = inviteEmailHtml(toEmail, inviteLink);
+    const payload = JSON.stringify({
+        from: RESEND_FROM,
+        to: [toEmail],
+        subject: 'You\'ve been invited to T-Term',
+        html,
+    });
+
+    return new Promise((resolve, reject) => {
+        const req = https.request({
+            hostname: 'api.resend.com',
+            path: '/emails',
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${RESEND_API_KEY}`,
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(payload),
+            },
+        }, (res) => {
+            let body = '';
+            res.on('data', c => body += c);
+            res.on('end', () => {
+                if (res.statusCode >= 200 && res.statusCode < 300) {
+                    try { resolve(JSON.parse(body)); } catch (e) { resolve(body); }
+                } else {
+                    console.error(`[EMAIL] Resend error ${res.statusCode}: ${body}`);
+                    reject(new Error(`Resend ${res.statusCode}: ${body}`));
+                }
+            });
+        });
+        req.on('error', reject);
+        req.end(payload);
+    });
+}
+
+function inviteEmailHtml(email, link) {
+    return `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#0a0a0f;font-family:'Segoe UI',system-ui,sans-serif;">
+<div style="max-width:520px;margin:0 auto;padding:40px 20px;">
+  <!-- Header -->
+  <div style="text-align:center;padding:32px 0 24px;">
+    <div style="display:inline-block;background:rgba(2,132,199,0.1);border:1px solid rgba(56,189,248,0.2);border-radius:16px;padding:20px 32px;">
+      <div style="font-size:28px;font-weight:700;color:#38bdf8;letter-spacing:3px;">T-TERM</div>
+      <div style="font-size:11px;color:#64748b;letter-spacing:2px;margin-top:4px;">SECURE TERMINAL ACCESS</div>
+    </div>
+  </div>
+
+  <!-- Card -->
+  <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:32px;margin-top:16px;">
+    <div style="font-size:20px;font-weight:600;color:#e6edf3;margin-bottom:8px;">Welcome aboard</div>
+    <div style="font-size:14px;color:#64748b;line-height:1.6;margin-bottom:24px;">
+      You've been invited to join T-Term. Click the button below to register your device and set up biometric authentication.
+    </div>
+
+    <!-- Button -->
+    <div style="text-align:center;margin:28px 0;">
+      <a href="${link}" style="display:inline-block;background:linear-gradient(135deg,#0284c7,#0ea5e9);color:#fff;text-decoration:none;padding:14px 40px;border-radius:10px;font-size:15px;font-weight:600;letter-spacing:1px;">
+        Register Device
+      </a>
+    </div>
+
+    <div style="font-size:12px;color:#475569;line-height:1.5;margin-top:20px;">
+      This invitation was sent to <strong style="color:#38bdf8;">${email}</strong>.
+      The link expires in 24 hours and can only be used once.
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <div style="text-align:center;padding:24px 0;font-size:11px;color:#334155;">
+    <div>If you didn't expect this invitation, you can safely ignore this email.</div>
+    <div style="margin-top:8px;color:#1e293b;">T-Term &mdash; Secure AI Terminal</div>
+  </div>
+
+  <!-- Link fallback -->
+  <div style="text-align:center;font-size:10px;color:#1e293b;word-break:break-all;padding:0 20px;">
+    ${link}
+  </div>
+</div>
+</body>
+</html>`;
+}
 
 // ---------------------------------------------------------------------------
 //  Try to load SimpleWebAuthn (graceful degradation)
@@ -747,10 +839,20 @@ async function handleAuthRoute(req, res, pathname) {
         invites.push(invite);
         saveInvites(invites);
         logAudit('invite_created', { email: invite.email, ip: req.socket.remoteAddress });
-        const rpConfig = getRpConfig(req);
-        const host = rpConfig.rpID === 'taybouts.com' ? 'term.taybouts.com' : req.headers.host;
-        const link = `https://${host}/invite?token=${token}`;
-        sendJson(res, { ok: true, link, token, expiresAt: invite.expiresAt });
+        // Always use the public URL for invite links (they're sent to external people)
+        const link = `https://term.taybouts.com/invite?token=${token}`;
+
+        // Send invite email
+        let emailSent = false;
+        try {
+            await sendInviteEmail(invite.email, link);
+            emailSent = true;
+            console.log(`[EMAIL] Invite sent to ${invite.email}`);
+        } catch (e) {
+            console.error(`[EMAIL] Failed to send invite to ${invite.email}:`, e.message);
+        }
+
+        sendJson(res, { ok: true, link, token, expiresAt: invite.expiresAt, emailSent });
         return true;
     }
 
@@ -831,7 +933,10 @@ async function serveLoginPage(req, res) {
 
 function isLocalRequest(req) {
     const ip = req.socket.remoteAddress || '';
-    return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+    if (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') return true;
+    // Allow local network (192.168.x.x)
+    if (ip.startsWith('192.168.') || ip.startsWith('::ffff:192.168.')) return true;
+    return false;
 }
 
 function isTailscaleRequest(req) {

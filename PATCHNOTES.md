@@ -1,5 +1,37 @@
 # T-Term Patch Notes
 
+## v1.0.0 — PTY Daemon, Session Persistence & Email Invites
+_Released: 2026-03-24_
+
+### New Features
+- **PTY Daemon** (`pty-daemon.js`) — standalone background process that owns all PTY instances. Terminal sessions survive T-Term server restarts. TCP protocol on port 7779 (NDJSON: spawn, attach, detach, write, resize, kill, list).
+- **Daemon Dashboard** — glass-themed web UI at `http://127.0.0.1:7780` showing active PTY sessions, live daemon log, peek into terminal scrollback, kill buttons.
+- **PTY Client CLI** (`pty-client.js`) — attach any terminal to a daemon-managed PTY: `node pty-client.js attach TAYTERM:claude`. Also: list, spawn, kill.
+- **Server Restart Recovery** — `recoverDaemonSessions()` discovers live PTYs from daemon on server startup, rebuilds `activeTerminals`, reattaches JSONL watchers. Zero downtime.
+- **Browser Auto-Reconnect** — `ws.onclose` automatically reconnects with `continue=1`. Named function handlers (`handleWsMessage`, `handleWsClose`) survive WebSocket replacement.
+- **Email Invites via Resend** — invite emails sent from `register@taybouts.com` with branded HTML template (glass design, T-TERM logo, blue CTA button). Auto-sends on invite creation.
+- **Notes Expand & Copy** — click note text to expand/collapse (was 3-line clamped), copy button on hover (bottom-right).
+- **Markdown Headers & Links** — h1-h4 rendering, markdown link support `[text](url)`, bare URL detection, localhost URL rewriting for mobile access.
+- **Read-Aloud Button** — hover on assistant bubbles shows speaker icon, click to send text to TTS server.
+- **Tab Menu: Close & Kill** — "Close & Kill" (red) terminates PTY via daemon. Close tab (X button) just detaches. "New Session" sends /clear.
+- **Empty Enter sends \r** — pressing Enter in messenger with empty text submits whatever is in the terminal input line (for confirming screenshots, plans, etc.)
+
+### Architecture
+- **Three-process model**: PTY Daemon (port 7779) → T-Term Server (port 7778) → Browser Client. Server is now a viewer/bridge — no direct `node-pty` usage.
+- **`server.js`**: Removed `require('node-pty')`. Added `DaemonClient` (TCP connection, NDJSON parsing, event routing). All `entry.pty.*` calls replaced with `daemonWrite/daemonResize/daemonKill`. `entry.alive` boolean replaces `entry.pty` truthiness. `ensureDaemon()` auto-starts daemon. `recoverDaemonSessions()` rebuilds state on startup.
+- **`pty-daemon.js`**: TCP server (`net.createServer`), session map (sessionKey → pty + subscribers + scrollback), HTTP dashboard server. 64KB scrollback ring buffer per session. Graceful shutdown kills all PTYs.
+- **JSONL Watcher overhaul**: Replaced 1-second polling interval with `fs.watch` on convDir (directory watcher). Snapshot-based: captures existing files at PTY start, only attaches to files not in snapshot. `attachLatest` for continue/resume. Removed `ignoreJsonlPath` mechanism entirely.
+- **Zombie watcher fix**: `handleApiKill` now calls `entry._onPtyExit()` before deleting entry — closes JSONL file watcher and directory watcher. Prevents old watchers from interfering with new sessions.
+- **Dir watcher switch**: Removed `if (jsonlPath) return;` guard so watcher switches to new JSONL files even when already attached (handles `--continue` creating new JSONL).
+- **`auth.js`**: Resend integration (HTTPS POST to api.resend.com), `sendInviteEmail()`, `inviteEmailHtml()` template. Invite links always use `term.taybouts.com`. `isLocalRequest` expanded to include 192.168.x.x.
+
+### Improvements
+- **Image scroll-lock respect** — image load no longer forces scroll to bottom if user scrolled up
+- **Typing indicator scroll-lock** — respects scroll position when updating thinking status
+- **Invite link always public** — links always use `term.taybouts.com` regardless of where admin accesses from
+
+---
+
 ## v0.6.0 — Auth Hardening, Invite System & Media Sessions
 _Released: 2026-03-24_
 

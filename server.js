@@ -8,8 +8,8 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execSync } = require('child_process');
-const pty = require('node-pty');
+const { execSync, spawn } = require('child_process');
+const net = require('net');
 const WebSocket = require('ws');
 // HeadlessTerminal removed — TTS + messenger now use JSONL (structured, clean data)
 const { isAuthenticated, handleAuthRoute, checkWebSocketAuth } = require('./auth');
@@ -34,8 +34,235 @@ const FAVORITES_FILE = path.join(BASE_DIR, 'favorites.json');
 // ANSI escape code regex
 const ANSI_RE = /\x1b\[[0-9;]*[A-Za-z]|\x1b\].*?\x07|\x1b[()][AB012]|\x1b\[\??[0-9;]*[hl]|\r/g;
 
-// Per-session PTY sessions: { "ProjectName:claude" or "ProjectName:shell": { pty, subscribers, ttsTap } }
+// Per-session PTY sessions: { "ProjectName:claude" or "ProjectName:shell": { alive, subscribers, ttsTap } }
 const activeTerminals = {};
+
+// ---------------------------------------------------------------------------
+//  PTY Daemon Client
+// ---------------------------------------------------------------------------
+const DAEMON_PORT = 7779;
+const DAEMON_HOST = '127.0.0.1';
+let daemonSocket = null;
+let daemonBuffer = '';
+let daemonReady = false;
+
+function daemonSend(obj) {
+    if (daemonSocket && daemonSocket.writable) {
+        daemonSocket.write(JSON.stringify(obj) + '\n');
+    }
+}
+
+function daemonSpawn(sessionKey, cwd, cols, rows) {
+    daemonSend({ action: 'spawn', sessionKey, cwd, cols, rows });
+}
+function daemonAttach(sessionKey) {
+    daemonSend({ action: 'attach', sessionKey });
+}
+function daemonDetach(sessionKey) {
+    daemonSend({ action: 'detach', sessionKey });
+}
+function daemonWrite(sessionKey, data) {
+    daemonSend({ action: 'write', sessionKey, data });
+}
+function daemonResize(sessionKey, cols, rows) {
+    daemonSend({ action: 'resize', sessionKey, cols, rows });
+}
+function daemonKill(sessionKey) {
+    daemonSend({ action: 'kill', sessionKey });
+}
+function daemonList() {
+    daemonSend({ action: 'list' });
+}
+
+function handleDaemonMessage(msg) {
+    const sessionKey = msg.sessionKey;
+    const entry = sessionKey ? activeTerminals[sessionKey] : null;
+
+    switch (msg.type) {
+        case 'output': {
+            if (!entry) return;
+            const dead = [];
+            for (const ws of entry.subscribers) {
+                try {
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: 'output', data: msg.data }));
+                    } else dead.push(ws);
+                } catch (e) { dead.push(ws); }
+            }
+            for (const ws of dead) entry.subscribers.delete(ws);
+            break;
+        }
+        case 'scrollback': {
+            if (!entry) return;
+            // Replay scrollback to all current subscribers
+            for (const ws of entry.subscribers) {
+                try {
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: 'output', data: msg.data }));
+                    }
+                } catch (e) { /* ignore */ }
+            }
+            break;
+        }
+        case 'exit': {
+            log(`PTY exited (daemon): ${sessionKey}`);
+            if (entry) {
+                entry.alive = false;
+                if (entry._onPtyExit) entry._onPtyExit();
+                // Notify WebSocket subscribers
+                for (const ws of entry.subscribers) {
+                    try {
+                        if (ws.readyState === WebSocket.OPEN) {
+                            ws.send(JSON.stringify({ type: 'status', data: 'PTY exited' }));
+                        }
+                    } catch (e) { /* ignore */ }
+                }
+            }
+            if (sessionKey && sessionKey.endsWith(':claude')) {
+                releaseProject(sessionKey.split(':')[0]);
+            }
+            break;
+        }
+        case 'spawned': {
+            log(`Daemon spawned: ${sessionKey} (PID ${msg.pid})`);
+            if (entry) entry.alive = true;
+            break;
+        }
+        case 'attached': {
+            log(`Daemon attached: ${sessionKey}`);
+            break;
+        }
+        case 'killed': {
+            log(`Daemon killed: ${sessionKey}`);
+            if (entry) {
+                entry.alive = false;
+                delete activeTerminals[sessionKey];
+            }
+            break;
+        }
+        case 'list': {
+            daemonSessionList = msg.sessions || [];
+            if (daemonListCallback) {
+                const cb = daemonListCallback;
+                daemonListCallback = null;
+                cb(daemonSessionList);
+            }
+            break;
+        }
+        case 'error': {
+            log(`Daemon error: ${msg.message}`);
+            break;
+        }
+    }
+}
+
+let daemonSessionList = [];
+let daemonListCallback = null;
+
+function daemonListAsync() {
+    return new Promise((resolve) => {
+        daemonListCallback = resolve;
+        daemonSend({ action: 'list' });
+        // Timeout in case daemon doesn't respond
+        setTimeout(() => { if (daemonListCallback) { daemonListCallback = null; resolve([]); } }, 2000);
+    });
+}
+
+function connectToDaemon() {
+    return new Promise((resolve) => {
+        const sock = net.createConnection({ port: DAEMON_PORT, host: DAEMON_HOST }, () => {
+            daemonSocket = sock;
+            daemonReady = true;
+            daemonBuffer = '';
+            log('Connected to PTY daemon');
+            resolve(true);
+        });
+
+        sock.on('data', (chunk) => {
+            daemonBuffer += chunk.toString();
+            let idx;
+            while ((idx = daemonBuffer.indexOf('\n')) >= 0) {
+                const line = daemonBuffer.slice(0, idx).trim();
+                daemonBuffer = daemonBuffer.slice(idx + 1);
+                if (!line) continue;
+                try {
+                    handleDaemonMessage(JSON.parse(line));
+                } catch (e) { log(`Bad daemon message: ${e.message}`); }
+            }
+        });
+
+        sock.on('close', () => {
+            log('Daemon connection lost');
+            daemonSocket = null;
+            daemonReady = false;
+            // Mark all sessions as dead
+            for (const key of Object.keys(activeTerminals)) {
+                activeTerminals[key].alive = false;
+            }
+            // Try to reconnect after 2 seconds
+            setTimeout(() => connectToDaemon().catch(() => {}), 2000);
+        });
+
+        sock.on('error', (err) => {
+            if (err.code === 'ECONNREFUSED') {
+                resolve(false);
+            } else {
+                log(`Daemon socket error: ${err.message}`);
+                resolve(false);
+            }
+        });
+    });
+}
+
+async function ensureDaemon() {
+    // Try to connect
+    let connected = await connectToDaemon();
+    if (connected) return;
+
+    // Not running — start it
+    log('Starting PTY daemon...');
+    const daemonProc = spawn('node', [path.join(__dirname, 'pty-daemon.js')], {
+        detached: true,
+        stdio: 'ignore',
+    });
+    daemonProc.unref();
+
+    // Wait for it to be ready
+    for (let i = 0; i < 10; i++) {
+        await new Promise(r => setTimeout(r, 500));
+        connected = await connectToDaemon();
+        if (connected) return;
+    }
+    log('WARNING: Could not connect to PTY daemon');
+}
+
+async function recoverDaemonSessions() {
+    if (!daemonReady) return;
+    const sessions = await daemonListAsync();
+    if (sessions.length === 0) {
+        log('Daemon recovery: no existing sessions');
+        return;
+    }
+    log(`Daemon recovery: found ${sessions.length} live session(s)`);
+    for (const s of sessions) {
+        const sessionKey = s.sessionKey;
+        if (activeTerminals[sessionKey]) continue; // Already known
+
+        // Rebuild the entry
+        const entry = { alive: true, subscribers: new Set(), ttsTap: null };
+        activeTerminals[sessionKey] = entry;
+
+        // Attach to get output
+        daemonAttach(sessionKey);
+
+        // Start JSONL watcher for claude sessions
+        if (sessionKey.endsWith(':claude')) {
+            startReader(sessionKey, { attachLatest: true });
+        }
+
+        log(`Recovered: ${sessionKey} (PID ${s.pid})`);
+    }
+}
 
 // TTS project claims — track which projects T-Term is handling TTS for
 const claimedProjects = new Set();
@@ -241,9 +468,9 @@ class TTSTap {
 //  PTY Reader
 // ---------------------------------------------------------------------------
 
-function startReader(sessionKey) {
+function startReader(sessionKey, opts) {
+    opts = opts || {};
     const entry = activeTerminals[sessionKey];
-    const ptyProc = entry.pty;
     let ttsTap = null;
 
     if (sessionKey.endsWith(':claude')) {
@@ -388,76 +615,74 @@ function startReader(sessionKey) {
         }
 
         // Start watching after a short delay (let Claude start first)
-        setTimeout(() => {
-            jsonlPath = findLatestJsonl();
-            if (jsonlPath) {
-                // Store on entry so history API can use the same file
-                entry.jsonlPath = jsonlPath;
-                // Start at end of file (don't replay history)
-                jsonlPos = fs.statSync(jsonlPath).size;
-                log(`Watching JSONL: ${jsonlPath}`);
-
-                // Watch for changes
-                jsonlWatcher = fs.watch(jsonlPath, () => readNewLines());
-
-                // Poll periodically in case fs.watch misses events
-                entry._jsonlInterval = setInterval(() => {
-                    readNewLines();
-                }, 1000);
-            }
-
-            // Expose switch function for session resume
-            entry._switchJsonl = (newPath) => {
-                if (jsonlWatcher) jsonlWatcher.close();
-                jsonlPath = newPath;
-                jsonlPos = fs.statSync(newPath).size; // Start at end
-                entry.jsonlPath = newPath;
-                jsonlWatcher = fs.watch(jsonlPath, () => readNewLines());
-                if (ttsTap) ttsTap.sentencesSent = new Set(); // Reset dedup for new session
-                log(`Watcher switched to: ${newPath}`);
-            };
-        }, 3000);
-
-        // Cleanup on PTY exit
-        const origOnExit = ptyProc.onExit;
-        ptyProc.onExit(() => {
+        function attachToJsonl(filePath) {
             if (jsonlWatcher) jsonlWatcher.close();
-            if (entry._jsonlInterval) clearInterval(entry._jsonlInterval);
-        });
-    }
+            jsonlPath = filePath;
+            entry.jsonlPath = filePath;
+            jsonlPos = fs.statSync(filePath).size; // Start at end
+            jsonlWatcher = fs.watch(jsonlPath, () => readNewLines());
+            if (ttsTap) ttsTap.sentencesSent = new Set();
+            log(`Watching JSONL: ${filePath}`);
+        }
 
-    ptyProc.onData((data) => {
-        // Broadcast raw PTY data to all WebSocket subscribers (for xterm.js on desktop)
-        const dead = [];
-        for (const ws of entry.subscribers) {
+        // Expose switch function for session resume / load-session
+        entry._switchJsonl = (newPath) => {
+            attachToJsonl(newPath);
+        };
+
+        // Expose clear-and-wait function for new session mid-PTY
+        entry._clearSession = () => {
+            if (jsonlWatcher) jsonlWatcher.close();
+            jsonlWatcher = null;
+            jsonlPath = null;
+            entry.jsonlPath = null;
+            // Re-snapshot so dir watcher only reacts to truly new files
+            existingFiles.clear();
             try {
-                if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ type: 'output', data: data }));
-                } else {
-                    dead.push(ws);
+                for (const f of fs.readdirSync(convDir)) {
+                    if (f.endsWith('.jsonl')) existingFiles.add(f);
                 }
-            } catch (e) {
-                dead.push(ws);
+            } catch (e) {}
+            log(`Session cleared, waiting for new JSONL in ${convDir}`);
+        };
+
+        // Snapshot existing JSONL files at PTY start
+        const existingFiles = new Set();
+        try {
+            if (fs.existsSync(convDir)) {
+                for (const f of fs.readdirSync(convDir)) {
+                    if (f.endsWith('.jsonl')) existingFiles.add(f);
+                }
+            }
+        } catch (e) {}
+
+        // Watch convDir for new JSONL files (no polling)
+        let dirWatcher = null;
+        if (!fs.existsSync(convDir)) fs.mkdirSync(convDir, { recursive: true });
+        dirWatcher = fs.watch(convDir, (eventType, filename) => {
+            if (!filename || !filename.endsWith('.jsonl')) return;
+            if (existingFiles.has(filename)) return; // Pre-existing file
+            const newPath = path.join(convDir, filename);
+            // New file appeared — this is our PTY's Claude session
+            attachToJsonl(newPath);
+            log(`Dir watcher switched to new JSONL: ${newPath}`);
+        });
+
+        // For continue/resume: attach to latest existing JSONL immediately
+        if (opts.attachLatest) {
+            const latest = findLatestJsonl();
+            if (latest) {
+                attachToJsonl(latest);
             }
         }
-        for (const ws of dead) {
-            entry.subscribers.delete(ws);
-        }
-        // PTY feed disabled — too much terminal UI noise (spinners, status bars, tips)
-        // TTS handled by feedClean via JSONL parser instead
-    });
 
-    ptyProc.onExit(() => {
-        log(`PTY exited: ${sessionKey}`);
-        if (activeTerminals[sessionKey]) {
-            activeTerminals[sessionKey].pty = null;
-        }
-        // Release TTS claim for this project
-        if (sessionKey.endsWith(':claude')) {
-            const proj = sessionKey.split(':')[0];
-            releaseProject(proj);
-        }
-    });
+        // Store cleanup callback for daemon exit handler
+        entry._onPtyExit = () => {
+            if (jsonlWatcher) jsonlWatcher.close();
+            if (dirWatcher) dirWatcher.close();
+        };
+    }
+    // PTY output and exit are now handled by the daemon event listener (handleDaemonMessage)
 }
 
 // ---------------------------------------------------------------------------
@@ -500,8 +725,8 @@ function getProjects() {
 
         const claudeKey = `${name}:claude`;
         const shellKey = `${name}:shell`;
-        const claudeLive = !!(activeTerminals[claudeKey]?.pty);
-        const shellLive = !!(activeTerminals[shellKey]?.pty);
+        const claudeLive = !!(activeTerminals[claudeKey]?.alive);
+        const shellLive = !!(activeTerminals[shellKey]?.alive);
         const isLive = claudeLive;
 
         // Check Claude conversation files
@@ -697,11 +922,13 @@ async function handleApiKill(req, res) {
         const key = `${name}:${keyType}`;
         if (activeTerminals[key]) {
             const entry = activeTerminals[key];
-            if (entry.pty) {
-                try { entry.pty.kill(); } catch (e) { /* ignore */ }
+            if (entry.alive) {
+                daemonKill(key);
                 killed.push(keyType);
                 if (keyType === 'claude') releaseProject(name);
             }
+            // Clean up JSONL/dir watchers before deleting
+            if (entry._onPtyExit) entry._onPtyExit();
             // Notify subscribers
             for (const ws of entry.subscribers) {
                 try {
@@ -712,7 +939,8 @@ async function handleApiKill(req, res) {
                 } catch (e) { /* ignore */ }
             }
             entry.subscribers.clear();
-            entry.pty = null;
+            entry.alive = false;
+            delete activeTerminals[key];
         }
     }
 
@@ -1023,9 +1251,9 @@ function handleWebSocket(ws, req) {
         return;
     }
 
-    // Check for existing live PTY
+    // Check for existing live PTY (in daemon)
     let isReattach = false;
-    if (activeTerminals[sessionKey]?.pty) {
+    if (activeTerminals[sessionKey]?.alive) {
         isReattach = true;
     }
 
@@ -1034,34 +1262,19 @@ function handleWebSocket(ws, req) {
         log(`Reattach: ${sessionKey} — ${remoteAddr}`);
         ws.send(JSON.stringify({ type: 'status', data: `reattached to live ${sessionType} PTY` }));
         entry = activeTerminals[sessionKey];
+        // Re-attach to daemon to get scrollback
+        daemonAttach(sessionKey);
     } else {
-        // Build env: remove Claude-related vars
-        const env = { ...process.env };
-        for (const v of ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_SESSION',
-                         'CLAUDE_CODE_ENTRY_POINT', 'CLAUDE_CODE_PARENT']) {
-            delete env[v];
-        }
-        env.TERM = 'xterm-256color';
-        env.COLORTERM = 'truecolor';
-
-        // ConPTY (default) for correct true-color support
-        const ptyProc = pty.spawn('powershell.exe', [], {
-            name: 'xterm-256color',
-            cols: 120,
-            rows: 30,
-            cwd: projectPath,
-            env,
-            conptyInheritCursor: true,
-        });
-
-        entry = { pty: ptyProc, subscribers: new Set(), ttsTap: null };
+        entry = { alive: true, subscribers: new Set(), ttsTap: null };
         activeTerminals[sessionKey] = entry;
-        startReader(sessionKey);
+
+        // Ask daemon to spawn PTY
+        daemonSpawn(sessionKey, projectPath, 120, 30);
+        daemonAttach(sessionKey);
+
+        startReader(sessionKey, { attachLatest: !!(continueClaude || resumeId) });
         log(`New PTY: ${sessionKey} — ${remoteAddr}`);
         ws.send(JSON.stringify({ type: 'status', data: `new ${sessionType} PTY started` }));
-
-        // Don't claim TTS at session creation — claim happens dynamically
-        // when feedClean actually fires (only unmuted sessions with active TTSTap)
 
         // Launch claude if requested (after delay for PowerShell to fully init)
         if (autoClaude || continueClaude || resumeId) {
@@ -1070,9 +1283,9 @@ function handleWebSocket(ws, req) {
             else if (resumeId) cmd += ' --resume ' + resumeId;
             log(`Will launch: ${cmd}`);
             setTimeout(() => {
-                if (entry.pty) {
+                if (entry.alive) {
                     log(`Sending to PTY: ${cmd}`);
-                    entry.pty.write(cmd + '\r');
+                    daemonWrite(sessionKey, cmd + '\r');
                 }
             }, 1500);
         }
@@ -1085,15 +1298,15 @@ function handleWebSocket(ws, req) {
         try {
             const payload = JSON.parse(raw.toString());
             if (payload.type === 'input') {
-                if (entry.pty) {
-                    entry.pty.write(payload.data);
+                if (entry.alive) {
+                    daemonWrite(sessionKey, payload.data);
                     if (entry.ttsTap) {
                         entry.ttsTap.userInput(payload.data);
                     }
                 }
             } else if (payload.type === 'resize') {
-                if (entry.pty) {
-                    entry.pty.resize(payload.cols, payload.rows);
+                if (entry.alive) {
+                    daemonResize(sessionKey, payload.cols, payload.rows);
                 }
             }
         } catch (e) { /* ignore */ }
@@ -1155,8 +1368,32 @@ async function requestHandler(req, res) {
             handleStatic(req, res, filename);
         } else if (req.method === 'GET' && pathname === '/api/projects') {
             handleApiProjects(req, res);
+        } else if (req.method === 'GET' && pathname === '/api/daemon') {
+            // Request daemon session list and return it
+            daemonList();
+            // Wait briefly for the response to arrive
+            await new Promise(r => setTimeout(r, 200));
+            sendJson(res, { connected: daemonReady, sessions: daemonSessionList });
         } else if (req.method === 'POST' && pathname === '/api/kill') {
             await handleApiKill(req, res);
+        } else if (req.method === 'POST' && pathname === '/api/new-session') {
+            // Mid-session clear: send /clear to PTY, reset JSONL watcher
+            const body = await readBody(req);
+            let data;
+            try { data = JSON.parse(body.toString()); } catch (e) { sendJson(res, { error: 'invalid json' }, 400); return; }
+            const name = data.name || '';
+            const sKey = name + ':claude';
+            const entry = activeTerminals[sKey];
+            if (entry && entry.alive) {
+                // Clear the JSONL watcher (marks old file as ignored, waits for new one)
+                if (entry._clearSession) entry._clearSession();
+                // Send /clear to the live PTY
+                daemonWrite(sKey, '/clear\r');
+                log(`New session (mid-PTY): ${name}`);
+                sendJson(res, { ok: true });
+            } else {
+                sendJson(res, { error: 'no active PTY' }, 400);
+            }
         } else if (req.method === 'GET' && pathname === '/api/sessions') {
             handleApiSessions(req, res);
         } else if (req.method === 'GET' && pathname === '/api/load-session') {
@@ -1235,7 +1472,9 @@ async function requestHandler(req, res) {
                     }
                 }
                 if (filterSession) {
-                    data = data.filter(m => m.sessionId === filterSession || !m.sessionId);
+                    data = data.filter(m => m.sessionId === filterSession);
+                } else {
+                    data = []; // No active session = no images
                 }
                 sendJson(res, data);
             } catch(e) { sendJson(res, []); }
@@ -1408,13 +1647,19 @@ async function requestHandler(req, res) {
 //  Main
 // ---------------------------------------------------------------------------
 
-function main() {
+async function main() {
     // Parse --port arg
     let port = 7777;
     const portIdx = process.argv.indexOf('--port');
     if (portIdx !== -1 && process.argv[portIdx + 1]) {
         port = parseInt(process.argv[portIdx + 1], 10) || 7777;
     }
+
+    // Connect to PTY daemon (starts it if not running)
+    await ensureDaemon();
+
+    // Recover any existing PTY sessions from the daemon
+    await recoverDaemonSessions();
 
     // Ensure SSL certs
     const certs = ensureCerts();
