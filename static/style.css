@@ -1214,7 +1214,7 @@ body.mobile .hero-status {
   transition:all 0.2s;
 }
 #mobile-photo:active { border-color:var(--accent-border); color:var(--accent2); }
-#mobile-mic.recording {
+#mobile-mic.recording, .mic-btn.recording {
   background:var(--red); border-color:var(--red);
   color:#fff; animation:mic-pulse 1s ease-in-out infinite;
 }
@@ -1463,6 +1463,14 @@ body.mobile .hero-status {
 @keyframes msgIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
 .msg.user { align-self:flex-end; align-items:flex-end; }
 .msg.assistant { align-self:flex-start; align-items:flex-start; }
+.msg.prompt-waiting { align-self:center; max-width:100%; animation:msgIn 0.3s ease; }
+.prompt-badge {
+  display:inline-block; padding:8px 20px; border-radius:20px;
+  background:rgba(245,158,11,0.1); border:1px solid rgba(245,158,11,0.25);
+  color:#f59e0b; font-size:12px; font-weight:600; letter-spacing:0.5px;
+  animation:promptPulse 2s ease-in-out infinite;
+}
+@keyframes promptPulse { 0%,100% { opacity:1; } 50% { opacity:0.6; } }
 .msg-bubble {
   padding:8px 14px; border-radius:14px;
   font-family:var(--font-body); font-size:15px; line-height:1.5;
@@ -1619,6 +1627,15 @@ body.show-stats .msg-extra { display:inline; }
 .msg-bubble:hover .bubble-read-btn { opacity:0.5; }
 .bubble-read-btn:hover { opacity:1 !important; background:rgba(0,0,0,0.7); color:var(--accent); }
 .bubble-read-btn.reading { opacity:1; color:var(--accent); }
+.bubble-copy-btn {
+  position:absolute; top:4px; right:28px;
+  width:20px; height:20px; display:flex; align-items:center; justify-content:center;
+  border-radius:4px; background:rgba(0,0,0,0.5);
+  color:var(--text3); cursor:pointer;
+  opacity:0; transition:opacity 0.15s;
+}
+.msg-bubble:hover .bubble-copy-btn { opacity:0.5; }
+.bubble-copy-btn:hover { opacity:1 !important; background:rgba(0,0,0,0.7); color:var(--accent); }
 .msg-actions {
   display:flex; gap:4px; margin-top:6px;
 }
@@ -1884,3 +1901,16 @@ body.show-stats .gs-toggle { opacity:1; color:var(--accent2); }
   background:rgba(220,50,50,0.15); color:#e04040; border-color:rgba(220,50,50,0.3);
 }
 .tterm-modal-btn.danger:hover { background:rgba(220,50,50,0.25); }
+
+/* iPad PWA safe areas */
+@supports (padding-top: env(safe-area-inset-top)) {
+  body.ipad-pwa .top-bar {
+    padding-top:env(safe-area-inset-top, 0px);
+    height:calc(40px + env(safe-area-inset-top, 0px));
+  }
+}
+body.ipad .terminal-view.active {
+  position:fixed;
+  top:0; left:0; right:0;
+  height:calc(100% + env(safe-area-inset-bottom, 20px));
+}
