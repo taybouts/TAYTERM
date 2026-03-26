@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@300;400;500&display=swap" rel="stylesheet">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -84,12 +84,6 @@
     </div>
   </div>
 
-  <!-- PAGE 3: ADMIN -->
-  <div class="page" id="page2">
-    <div class="admin-embed">
-      <iframe id="adminFrame" src="" frameborder="0"></iframe>
-    </div>
-  </div>
 
 </div><!-- end pages -->
 
@@ -194,6 +188,7 @@
     <button id="mobile-back" onclick="mobileShowPicker()">&#9664;</button>
     <span id="mobile-project-name"></span>
     <button id="mobile-toggle-view" onclick="mobileToggleView()">TTY</button>
+    <button id="mobile-ink-btn" onclick="inkToggleMode()">INK</button>
     <button id="mobile-mute" onclick="mobileToggleMute()"></button>
   </div>
   <div id="mobile-messages"></div>
@@ -204,6 +199,18 @@
     <input type="file" id="mobile-photo-input" accept="image/*" style="display:none" onchange="mobileUploadPhoto(this)">
     <textarea id="mobile-input" placeholder="Message Claude..." rows="1"></textarea>
     <button id="mobile-send" onclick="mobileSend()">&#9654;</button>
+  </div>
+</div>
+
+<!-- Voice Interface (mobile) -->
+<div id="ink-view" style="display:none">
+  <div class="ink-overlay">
+    <span id="ink-project" class="ink-project-label"></span>
+    <button class="ink-chat-btn" onclick="inkToggleMode()">CHAT</button>
+  </div>
+  <div class="ink-bottom-overlay">
+    <button class="ink-effect-btn" onclick="inkCycleEffect()"><span id="ink-effect-label">INK</span></button>
+    <span id="ink-status" class="ink-status-label"></span>
   </div>
 </div>
 
@@ -232,6 +239,18 @@
   </div>
 </div>
 
+<!-- Voice Player Bar -->
+<div id="voiceBar" class="voice-bar">
+  <button class="vb-btn" onclick="_vpPrev()" title="Previous">&#9198;</button>
+  <button class="vb-btn" id="vpPlayPause" onclick="_vpTogglePause()" title="Pause / Resume">&#9208;</button>
+  <button class="vb-btn" onclick="_vpNext()" title="Next">&#9197;</button>
+  <button class="vb-btn vb-stop" onclick="_vpStop()" title="Stop">&times;</button>
+  <div class="vb-timeline" id="vpTimeline" onclick="_vpTimelineClick(event)" title="Click to jump">
+    <div class="vb-fill" id="vpProgress"></div>
+  </div>
+  <span class="vb-counter" id="vpCounter">0 / 0</span>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/lib/addon-fit.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.19.0/lib/addon-webgl.min.js"></script>
@@ -240,5 +259,6 @@
 <script src="/static/messenger.js"></script>
 <script src="/static/mobile.js"></script>
 <script src="/static/ipad.js"></script>
+<script src="/static/ink.js"></script>
 </body>
 </html>

@@ -3,33 +3,18 @@
 
 if (isIPad) {
 
-  // Mark both html and body for iPad-specific CSS
-  document.documentElement.classList.add('ipad');
+  // Mark body for iPad-specific CSS
   document.body.classList.add('ipad');
   // Detect PWA standalone mode (Add to Home Screen)
   if (window.navigator.standalone || window.matchMedia('(display-mode: standalone)').matches) {
     document.body.classList.add('ipad-pwa');
   }
 
-  // Version indicator
-  const _v = document.createElement('div');
-  _v.textContent = 'iPad v17';
-  _v.style.cssText = 'position:fixed;bottom:2px;left:2px;font-size:9px;color:rgba(255,255,255,0.2);z-index:9999;pointer-events:none;';
-  document.body.appendChild(_v);
-
-  // Unlock the html frame — overflow:hidden on html clips the safe area on iOS Safari
-  document.documentElement.style.overflowY = 'visible';
-  document.documentElement.style.overflowX = 'hidden';
-
   // ── Connection detection: LAN vs Tailscale vs Cloudflare ──
-  const host = window.location.hostname;
-  const isLocal = host === '127.0.0.1' || host === 'localhost' || host === '::1' || host.startsWith('192.168.');
-  const isTailscale = !isLocal && (host.startsWith('100.64.') || host.startsWith('100.100.') || host.includes('tse.mesh'));
-  const isCloudflare = !isLocal && !isTailscale;
-  const connMode = isLocal ? 'local' : isTailscale ? 'tailscale' : 'cloudflare';
-  const connLabel = isLocal ? 'LAN' : isTailscale ? 'TS' : 'CF';
-  const connTitle = isLocal ? 'Local (direct)' : isTailscale ? 'Tailscale (direct)' : 'Cloudflare (proxied)';
-  const connColor = isLocal ? '34,197,94' : isTailscale ? '56,189,248' : '245,158,11'; // green, blue, orange
+  // Use global connection detection from app.js
+  const connLabel = connIsLocal ? 'LAN' : connIsTailscale ? 'TS' : 'CF';
+  const connTitle = connIsLocal ? 'Local (direct)' : connIsTailscale ? 'Tailscale (direct)' : 'Cloudflare (proxied)';
+  const connColor = connIsLocal ? '34,197,94' : connIsTailscale ? '56,189,248' : '245,158,11';
 
   // Connection indicator badge
   const _connIcon = document.createElement('div');
@@ -56,164 +41,13 @@ if (isIPad) {
     }
   });
 
-  // Voice input state
-  let ipadRecognition = null;
-  let ipadIsRecording = false;
-  let ipadMicDismissed = false;
-
+  // Voice input — uses shared Whisper STT from messenger.js (_sttToggle)
   function ipadToggleMic(micBtn, textarea) {
-    if (ipadIsRecording) {
-      // Stop recording
-      ipadMicDismissed = true;
-      if (ipadRecognition) ipadRecognition.stop();
-      ipadIsRecording = false;
-      ipadRecognition = null;
-      micBtn.classList.remove('recording');
-      return;
-    }
-
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) return;
-
-    ipadMicDismissed = false;
-    ipadRecognition = new SR();
-    ipadRecognition.continuous = true;
-    ipadRecognition.interimResults = true;
-    ipadRecognition.lang = 'en-US';
-
-    ipadRecognition.onresult = (e) => {
-      if (ipadMicDismissed) return;
-      let text = '';
-      for (let i = 0; i < e.results.length; i++) {
-        text += e.results[i][0].transcript;
-      }
-      textarea.value = text;
-      textarea.style.height = '44px';
-      if (textarea.scrollHeight > 44) textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px';
-    };
-
-    ipadRecognition.onend = () => {
-      ipadIsRecording = false;
-      micBtn.classList.remove('recording');
-      ipadRecognition = null;
-    };
-
-    ipadRecognition.start();
-    ipadIsRecording = true;
-    micBtn.classList.add('recording');
+    _sttToggle(micBtn, textarea);
   }
 
-  // ── TTS — stream audio from Kokoro via Tailscale, browser fallback ──
-  // TTS: local direct, Tailscale direct, or Cloudflare proxy
-  const IPAD_TTS = isCloudflare ? window.location.origin + '/api/tts' : 'http://' + host + ':7123';
-  let _ttsAudioCtx = null;
-  let _ttsAbort = null;
-  let _ttsServerOk = null; // null=unknown, true/false=cached result
-
-  function _ttsCtx() {
-    if (!_ttsAudioCtx) _ttsAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    if (_ttsAudioCtx.state === 'suspended') _ttsAudioCtx.resume();
-    return _ttsAudioCtx;
-  }
-
-  // Check if Kokoro server is reachable (cached for 60s)
-  async function _ttsCheckServer() {
-    if (_ttsServerOk !== null) return _ttsServerOk;
-    try {
-      const resp = await fetch(IPAD_TTS + '/status', { signal: AbortSignal.timeout(2000) });
-      _ttsServerOk = resp.ok;
-    } catch(e) { _ttsServerOk = false; }
-    setTimeout(() => { _ttsServerOk = null; }, 60000); // Re-check after 60s
-    return _ttsServerOk;
-  }
-
-  // Stream PCM audio from Kokoro /stream endpoint (same as LEGAL app)
-  async function _ttsStreamKokoro(text) {
-    _ttsAbort = new AbortController();
-    const resp = await fetch(IPAD_TTS + '/stream', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: text.substring(0, 10000), voice: 'af_bella', speed: 1.25 }),
-      signal: _ttsAbort.signal
-    });
-    if (!resp.ok) throw new Error('TTS ' + resp.status);
-    const ctx = _ttsCtx();
-    let nextPlayTime = ctx.currentTime;
-    const reader = resp.body.getReader();
-    let buffer = new Uint8Array(0);
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      // Append to buffer
-      const tmp = new Uint8Array(buffer.length + value.length);
-      tmp.set(buffer); tmp.set(value, buffer.length);
-      buffer = tmp;
-      // Parse chunks: 4-byte little-endian length header + PCM data
-      while (buffer.length >= 4) {
-        const chunkLen = buffer[0] | (buffer[1] << 8) | (buffer[2] << 16) | (buffer[3] << 24);
-        if (buffer.length < 4 + chunkLen) break;
-        const pcm = buffer.slice(4, 4 + chunkLen);
-        buffer = buffer.slice(4 + chunkLen);
-        // Convert to float32 audio
-        const samples = new Float32Array(pcm.length / 2);
-        const view = new DataView(pcm.buffer, pcm.byteOffset, pcm.byteLength);
-        for (let i = 0; i < samples.length; i++) {
-          samples[i] = view.getInt16(i * 2, true) / 32768;
-        }
-        const audioBuf = ctx.createBuffer(1, samples.length, 24000);
-        audioBuf.getChannelData(0).set(samples);
-        const src = ctx.createBufferSource();
-        src.buffer = audioBuf;
-        src.connect(ctx.destination);
-        const startTime = Math.max(nextPlayTime, ctx.currentTime);
-        src.start(startTime);
-        nextPlayTime = startTime + audioBuf.duration;
-      }
-    }
-  }
-
-  // Browser SpeechSynthesis fallback
-  function _ttsBrowserSpeak(text) {
-    const synth = window.speechSynthesis;
-    if (!synth) return;
-    synth.cancel();
-    const utter = new SpeechSynthesisUtterance(text);
-    utter.rate = 1.1;
-    utter.pitch = 1.0;
-    // Try to pick a good English voice
-    const voices = synth.getVoices();
-    const preferred = voices.find(v => v.name.includes('Samantha')) || voices.find(v => v.lang.startsWith('en'));
-    if (preferred) utter.voice = preferred;
-    synth.speak(utter);
-  }
-
-  function _ttsStop() {
-    if (_ttsAbort) { _ttsAbort.abort(); _ttsAbort = null; }
-    if (window.speechSynthesis) window.speechSynthesis.cancel();
-    if (_ttsAudioCtx) {
-      _ttsAudioCtx.close().catch(() => {});
-      _ttsAudioCtx = null;
-    }
-  }
-
-  // Override readBubbleAloud to play on device instead of server speakers
-  const _origReadBubble = readBubbleAloud;
-  readBubbleAloud = function(text, btn) {
-    if (btn.classList.contains('reading')) {
-      btn.classList.remove('reading');
-      _ttsStop();
-      return;
-    }
-    btn.classList.add('reading');
-    _ttsCheckServer().then(ok => {
-      if (ok) {
-        _ttsStreamKokoro(text).catch(() => _ttsBrowserSpeak(text)).finally(() => btn.classList.remove('reading'));
-      } else {
-        _ttsBrowserSpeak(text);
-        btn.classList.remove('reading');
-      }
-    });
-  };
+  // TTS is now handled by the voice player in messenger.js
+  // (Kokoro streaming, sentence-by-sentence with highlighting)
 
   // Override createMessengerPane to add photo picker + wire mic button
   const _origCreateMessengerPane = createMessengerPane;
@@ -229,6 +63,16 @@ if (isIPad) {
       micBtn._ipadWired = true;
       const textarea = inputRow.querySelector('.chat-textarea');
       micBtn.onclick = (e) => { e.preventDefault(); ipadToggleMic(micBtn, textarea); };
+    }
+    // Stop mic recording when send is pressed
+    const sendBtn = inputRow.querySelector('.send-btn');
+    if (sendBtn && !sendBtn._ipadWired) {
+      sendBtn._ipadWired = true;
+      const origClick = sendBtn.onclick;
+      sendBtn.onclick = (e) => {
+        if (_sttRecording && micBtn) ipadToggleMic(micBtn, inputRow.querySelector('.chat-textarea'));
+        if (origClick) origClick(e);
+      };
     }
 
     // Add photo picker if not already present

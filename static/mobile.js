@@ -65,6 +65,14 @@ function mobileOpenSession(name, continueFlag) {
             if (typing) typing.remove();
             mobileToolBadges = [];
             mobileAddMessage('assistant', msg.text);
+            // Auto-play TTS with highlights on new assistant messages
+            if (!mobileMuted && typeof _vpStart === 'function' && !_vp.active) {
+              const lastBubble = document.querySelector('#mobile-messages .msg.assistant:last-child .msg-bubble');
+              if (lastBubble) {
+                const readBtn = lastBubble.querySelector('.bubble-read-btn');
+                setTimeout(() => _vpStart(lastBubble, msg.text, readBtn, 0), 100);
+              }
+            }
           }
         } else if (msg.type === 'thinking') {
           mobileShowTyping('Thinking...');
@@ -137,13 +145,58 @@ async function mobileLoadHistory(name) {
     allItems.sort((a, b) => a.ts - b.ts);
 
     const container = document.getElementById('mobile-messages');
-    for (const item of allItems) {
+    // Limit to last 50 messages for performance
+    const MSG_LIMIT = 50;
+    const startIdx = Math.max(0, allItems.length - MSG_LIMIT);
+    const rendered = allItems.slice(startIdx);
+    // Batch append with DocumentFragment
+    const frag = document.createDocumentFragment();
+    for (const item of rendered) {
       if (item.type === 'image') {
-        mobileAddImage(item.url, item.time);
+        // Inline image creation (skip mobileAddImage which appends directly)
+        const msg = document.createElement('div');
+        msg.className = 'msg user';
+        const bubble = document.createElement('div');
+        bubble.className = 'msg-bubble msg-image';
+        const img = document.createElement('img');
+        img.src = item.url;
+        img.onclick = () => { const v = document.createElement('div'); v.className = 'image-viewer'; v.innerHTML = '<img src="' + item.url + '">'; v.onclick = () => v.remove(); document.body.appendChild(v); };
+        bubble.appendChild(img);
+        msg.appendChild(bubble);
+        const meta = document.createElement('div');
+        meta.className = 'msg-meta';
+        meta.textContent = item.time || '';
+        msg.appendChild(meta);
+        frag.appendChild(msg);
       } else {
-        mobileAddMessage(item.role, item.text, item.time);
+        // Inline message creation (skip mobileAddMessage which appends + scrolls)
+        const msg = document.createElement('div');
+        msg.className = 'msg ' + item.role;
+        const bubble = document.createElement('div');
+        bubble.className = 'msg-bubble';
+        if (item.role === 'assistant') {
+          bubble.innerHTML = mobileRenderMarkdown(item.text);
+          bubble.querySelectorAll('pre').forEach(pre => { pre.onclick = () => pre.classList.toggle('expanded'); });
+          if (typeof readBubbleAloud === 'function') {
+            const readBtn = document.createElement('div');
+            readBtn.className = 'bubble-read-btn';
+            readBtn.title = 'Read aloud';
+            readBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
+            readBtn.onclick = (e) => { e.stopPropagation(); readBubbleAloud(item.text, readBtn); };
+            bubble.appendChild(readBtn);
+          }
+        } else {
+          bubble.textContent = item.text;
+        }
+        msg.appendChild(bubble);
+        const meta = document.createElement('div');
+        meta.className = 'msg-meta';
+        meta.textContent = item.time || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        msg.appendChild(meta);
+        frag.appendChild(msg);
       }
     }
+    container.appendChild(frag);
     mobileLastMsgCount = messages.length;
     container.scrollTop = container.scrollHeight;
   } catch(err) {}
@@ -258,6 +311,15 @@ function mobileAddMessage(role, text, time) {
     bubble.querySelectorAll('pre').forEach(pre => {
       pre.onclick = () => pre.classList.toggle('expanded');
     });
+    // Read-aloud button (uses voice player from messenger.js)
+    if (typeof readBubbleAloud === 'function') {
+      const readBtn = document.createElement('div');
+      readBtn.className = 'bubble-read-btn';
+      readBtn.title = 'Read aloud';
+      readBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
+      readBtn.onclick = (e) => { e.stopPropagation(); readBubbleAloud(text, readBtn); };
+      bubble.appendChild(readBtn);
+    }
   } else {
     bubble.textContent = text;
   }
@@ -343,13 +405,13 @@ function mobileAppendStreaming(rawData) {
   container.scrollTop = container.scrollHeight;
 }
 
-function mobileSend() {
+async function mobileSend() {
   const input = document.getElementById('mobile-input');
-  // Stop recording first and wait a moment for final result
-  if (mobileIsRecording) {
-    mobileStopMic();
-    // Delay send slightly to let final recognition result land
-    setTimeout(() => mobileSendText(), 300);
+  // If recording, stop + transcribe + auto-send
+  if (_sttRecording) {
+    const micBtn = document.getElementById('mobile-mic');
+    await _sttStop(micBtn, input, false); // transcribe and paste into textarea
+    mobileSendText(); // send immediately after transcription
     return;
   }
   mobileSendText();
@@ -403,68 +465,31 @@ function mobileShowPicker() {
   showPicker();
 }
 
-let mobileRecognition = null;
-let mobileIsRecording = false;
-let mobileMicDismissed = false;
-
+// STT — uses shared Whisper STT from messenger.js
 function mobileStopMic() {
-  if (mobileRecognition) {
-    mobileMicDismissed = true;
-    mobileRecognition.stop();
+  if (_sttRecording) {
+    const micBtn = document.getElementById('mobile-mic');
+    const input = document.getElementById('mobile-input');
+    _sttStop(micBtn, input);
   }
-  mobileIsRecording = false;
-  mobileRecognition = null;
-  document.getElementById('mobile-mic').classList.remove('recording');
 }
 
 function mobileToggleMic() {
+  const micBtn = document.getElementById('mobile-mic');
   const input = document.getElementById('mobile-input');
-
-  if (mobileIsRecording) {
-    // Cancel — stop and clear
-    mobileStopMic();
-    input.value = '';
-    input.style.height = 'auto';
-    return;
+  if (_sttRecording) {
+    // Tap mic again = cancel recording, discard audio
+    _sttRecording = false;
+    micBtn.classList.remove('recording');
+    if (_sttRecorder) _sttRecorder.stop();
+    if (_sttStream) { _sttStream.getTracks().forEach(t => t.stop()); _sttStream = null; }
+    _sttChunks = [];
+    _sttLockedTextarea = null;
+    _sttLockedMicBtn = null;
+    _sttLockedSendFn = null;
+  } else {
+    _sttStart(micBtn, input);
   }
-
-  // Start recording
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) { alert('Speech recognition not supported'); return; }
-
-  mobileMicDismissed = false;
-  mobileRecognition = new SR();
-  mobileRecognition.continuous = true;
-  mobileRecognition.interimResults = true;
-  mobileRecognition.lang = 'en-US';
-
-  mobileRecognition.onresult = (e) => {
-    if (mobileMicDismissed) return;
-    let text = '';
-    for (let i = 0; i < e.results.length; i++) {
-      text += e.results[i][0].transcript;
-    }
-    input.value = text;
-    input.style.height = 'auto';
-    input.style.height = Math.min(input.scrollHeight, 120) + 'px';
-  };
-
-  mobileRecognition.onend = () => {
-    mobileIsRecording = false;
-    document.getElementById('mobile-mic').classList.remove('recording');
-    mobileRecognition = null;
-  };
-
-  mobileRecognition.onerror = () => {
-    mobileIsRecording = false;
-    document.getElementById('mobile-mic').classList.remove('recording');
-    mobileRecognition = null;
-  };
-
-  mobileRecognition.start();
-  mobileIsRecording = true;
-  document.getElementById('mobile-mic').classList.add('recording');
-  btn.classList.add('recording');
 }
 
 function mobileToggleView() {
@@ -557,12 +582,17 @@ function mobileToggleView() {
         }
       }, { passive: true });
       termDiv.addEventListener('touchend', () => { pinchStartDist = 0; }, { passive: true });
+      // Store fitAddon for re-fit on view toggle
+      mobileTerm._mFitAddon = mFitAddon;
       // Fit after render
       setTimeout(() => mFitAddon.fit(), 200);
       // Don't send resize — let desktop control PTY size
     } else {
-      // Re-fit existing terminal
-      setTimeout(() => mobileTerm.element && mobileTerm.refresh(0, mobileTerm.rows - 1), 100);
+      // Re-fit and refresh existing terminal
+      setTimeout(() => {
+        if (mobileTerm && mobileTerm._mFitAddon) mobileTerm._mFitAddon.fit();
+        if (mobileTerm) mobileTerm.refresh(0, mobileTerm.rows - 1);
+      }, 100);
     }
   } else {
     // Switch to chat view
@@ -577,10 +607,6 @@ function mobileToggleMute() {
   const btn = document.getElementById('mobile-mute');
   btn.textContent = mobileMuted ? 'MUTED' : 'MUTE';
   btn.classList.toggle('muted', mobileMuted);
-  if (mobileProject) {
-    fetch(TTS_BASE + '/tts-state', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({project: mobileProject, state: mobileMuted ? 'muted' : 'default'})
-    }).catch(() => {});
-  }
+  // Stop voice player if muting
+  if (mobileMuted && typeof _vpStop === 'function') _vpStop();
 }

@@ -9,7 +9,15 @@ const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
 const isIPadOS = navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1 && !/Windows/.test(navigator.userAgent);
 const isIPad = isIPadOS || /iPad/.test(navigator.userAgent);
 const isMobile = isIOS && !isIPad && screen.width <= 500;
-const TTS_BASE = 'http://' + window.location.hostname + ':7123';
+// Connection detection — available to all device-specific scripts
+const _host = window.location.hostname;
+const connIsLocal = _host === '127.0.0.1' || _host === 'localhost' || _host === '::1' || _host.startsWith('192.168.');
+const connIsTailscale = !connIsLocal && (_host.startsWith('100.64.') || _host.startsWith('100.100.') || _host.includes('tse.mesh'));
+const connIsCloudflare = !connIsLocal && !connIsTailscale;
+const connMode = connIsLocal ? 'local' : connIsTailscale ? 'tailscale' : 'cloudflare';
+
+// TTS: always proxy through server to avoid mixed-content and CORS issues
+const TTS_BASE = window.location.origin + '/api/tts';
 const KOKORO_VOICES = [
   'am_onyx','am_adam','am_michael','am_fenrir','am_puck','am_liam',
   'af_bella','af_sarah','af_nicole','af_sky','af_heart',
@@ -30,14 +38,17 @@ const SESSION_IMAGE_LIMIT = 20 * 1024 * 1024; // 20MB
 // ══════════════════════════════════════════
 //  Session persistence (localStorage)
 // ══════════════════════════════════════════
+let _saveTimer = null;
 function saveState() {
-  // Save tab order by name (IDs change across sessions)
-  const orderedNames = tabOrder.map(id => sessions[id]?.name).filter(Boolean);
-  const tabs = Object.values(sessions).map(s => ({ name: s.name, isShell: s.isShell, muted: s.muted || false }));
-  const active = activeSessionId ? sessions[activeSessionId]?.name : null;
-  // Save pane assignments by name (IDs change across sessions)
-  const panes = paneSlots.map(id => id && sessions[id] ? sessions[id].name : null);
-  localStorage.setItem('tterm_tabs', JSON.stringify({ tabs, active, layout, panes, tabOrder: orderedNames }));
+  if (_saveTimer) return; // Already scheduled
+  _saveTimer = setTimeout(() => {
+    _saveTimer = null;
+    const orderedNames = tabOrder.map(id => sessions[id]?.name).filter(Boolean);
+    const tabs = Object.values(sessions).map(s => ({ name: s.name, isShell: s.isShell, muted: s.muted || false }));
+    const active = activeSessionId ? sessions[activeSessionId]?.name : null;
+    const panes = paneSlots.map(id => id && sessions[id] ? sessions[id].name : null);
+    localStorage.setItem('tterm_tabs', JSON.stringify({ tabs, active, layout, panes, tabOrder: orderedNames }));
+  }, 500);
 }
 
 function loadState() {
@@ -945,68 +956,85 @@ function getOrderedSessionIds() {
   return ordered;
 }
 
+const _muteIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>';
+const _speakerIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>';
+const _closeIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+let _renderTabsTimer = null;
+
 function renderTabs() {
+  // Debounce rapid calls (speaking state, messages, etc.)
+  if (_renderTabsTimer) cancelAnimationFrame(_renderTabsTimer);
+  _renderTabsTimer = requestAnimationFrame(_renderTabsNow);
+}
+
+function _renderTabsNow() {
+  _renderTabsTimer = null;
   const strip = document.getElementById('tab-strip');
-  strip.innerHTML = '';
-  const muteIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>';
-  const speakerIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>';
-  const closeIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
   const orderedIds = getOrderedSessionIds();
+  const existingTabs = strip.querySelectorAll('.tab-item');
+  const existingMap = {};
+  existingTabs.forEach(t => { existingMap[t.dataset.tabId] = t; });
+
+  // Update existing tabs in-place, create new ones as needed
   let dragSrcId = null;
+  const seen = new Set();
+  let insertBefore = strip.querySelector('.tab-add');
+
   for (const id of orderedIds) {
     const s = sessions[id];
     if (!s) continue;
+    seen.add(id);
     const tabColor = s.isShell ? '#38bdf8' : getProjectColor(s.name);
-    const tab = document.createElement('div');
-    tab.className = 'tab-item' + (id === activeSessionId ? ' active' : '') + (s.speaking ? ' speaking' : '');
-    tab.draggable = true;
-    tab.dataset.tabId = id;
-    tab.innerHTML =
-      '<div class="tab-color" style="background:' + tabColor + '"></div>' +
-      (s.isShell ? '<span class="tab-sh-badge">SH</span>' : '') +
-      '<span class="tab-name">' + s.name + '</span>' +
-      '<button class="tab-mute' + (s.muted ? ' muted' : '') + (s.speaking ? ' speaking' : '') + '" onclick="event.stopPropagation(); toggleMute(\'' + id + '\')">' + (s.muted ? muteIcon : speakerIcon) + '</button>' +
-      '<button class="tab-close" onclick="event.stopPropagation(); closeSession(\'' + id + '\')">' + closeIcon + '</button>';
-    tab.onclick = () => switchTab(id);
-    if (!s.isShell) {
-      tab.oncontextmenu = (e) => { e.preventDefault(); showTabMenu(id, e); };
-    }
-    // Drag and drop
-    tab.addEventListener('dragstart', (e) => {
-      dragSrcId = id;
-      tab.classList.add('dragging');
-      e.dataTransfer.effectAllowed = 'move';
-    });
-    tab.addEventListener('dragend', () => {
-      tab.classList.remove('dragging');
-      strip.querySelectorAll('.tab-item').forEach(t => t.classList.remove('drag-over'));
-    });
-    tab.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      strip.querySelectorAll('.tab-item').forEach(t => t.classList.remove('drag-over'));
-      if (id !== dragSrcId) tab.classList.add('drag-over');
-    });
-    tab.addEventListener('drop', (e) => {
-      e.preventDefault();
-      if (dragSrcId && dragSrcId !== id) {
-        const fromIdx = tabOrder.indexOf(dragSrcId);
-        const toIdx = tabOrder.indexOf(id);
-        if (fromIdx >= 0 && toIdx >= 0) {
-          tabOrder.splice(fromIdx, 1);
-          tabOrder.splice(toIdx, 0, dragSrcId);
-          renderTabs();
-          saveState();
-        }
+    const wantClass = 'tab-item' + (id === activeSessionId ? ' active' : '') + (s.speaking ? ' speaking' : '');
+
+    let tab = existingMap[id];
+    if (tab) {
+      // Update in place
+      if (tab.className !== wantClass) tab.className = wantClass;
+      const muteBtn = tab.querySelector('.tab-mute');
+      if (muteBtn) {
+        const wantMuteClass = 'tab-mute' + (s.muted ? ' muted' : '') + (s.speaking ? ' speaking' : '');
+        if (muteBtn.className !== wantMuteClass) muteBtn.className = wantMuteClass;
+        const wantIcon = s.muted ? _muteIcon : _speakerIcon;
+        if (muteBtn.innerHTML !== wantIcon) muteBtn.innerHTML = wantIcon;
       }
-    });
-    strip.appendChild(tab);
+      // Ensure correct order
+      if (tab.nextSibling !== insertBefore) strip.insertBefore(tab, insertBefore);
+      insertBefore = tab.nextSibling;
+    } else {
+      // Create new tab
+      tab = document.createElement('div');
+      tab.className = wantClass;
+      tab.draggable = true;
+      tab.dataset.tabId = id;
+      tab.innerHTML =
+        '<div class="tab-color" style="background:' + tabColor + '"></div>' +
+        (s.isShell ? '<span class="tab-sh-badge">SH</span>' : '') +
+        '<span class="tab-name">' + s.name + '</span>' +
+        '<button class="tab-mute' + (s.muted ? ' muted' : '') + (s.speaking ? ' speaking' : '') + '" onclick="event.stopPropagation(); toggleMute(\'' + id + '\')">' + (s.muted ? _muteIcon : _speakerIcon) + '</button>' +
+        '<button class="tab-close" onclick="event.stopPropagation(); closeSession(\'' + id + '\')">' + _closeIcon + '</button>';
+      tab.onclick = () => switchTab(id);
+      if (!s.isShell) tab.oncontextmenu = (e) => { e.preventDefault(); showTabMenu(id, e); };
+      tab.addEventListener('dragstart', (e) => { dragSrcId = id; tab.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; });
+      tab.addEventListener('dragend', () => { tab.classList.remove('dragging'); strip.querySelectorAll('.drag-over').forEach(t => t.classList.remove('drag-over')); });
+      tab.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; strip.querySelectorAll('.drag-over').forEach(t => t.classList.remove('drag-over')); if (id !== dragSrcId) tab.classList.add('drag-over'); });
+      tab.addEventListener('drop', (e) => { e.preventDefault(); if (dragSrcId && dragSrcId !== id) { const f = tabOrder.indexOf(dragSrcId), t2 = tabOrder.indexOf(id); if (f >= 0 && t2 >= 0) { tabOrder.splice(f, 1); tabOrder.splice(t2, 0, dragSrcId); renderTabs(); saveState(); } } });
+      strip.insertBefore(tab, insertBefore);
+      insertBefore = tab.nextSibling;
+    }
   }
-  const addBtn = document.createElement('button');
-  addBtn.className = 'tab-add';
-  addBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
-  addBtn.onclick = () => showPicker();
-  strip.appendChild(addBtn);
+
+  // Remove tabs for closed sessions
+  existingTabs.forEach(t => { if (!seen.has(t.dataset.tabId)) t.remove(); });
+
+  // Ensure add button exists
+  if (!strip.querySelector('.tab-add')) {
+    const addBtn = document.createElement('button');
+    addBtn.className = 'tab-add';
+    addBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
+    addBtn.onclick = () => showPicker();
+    strip.appendChild(addBtn);
+  }
 }
 
 function showTabMenu(sessionId, event) {
@@ -1132,14 +1160,8 @@ function toggleMute(id) {
   if (!sessions[id]) return;
   const s = sessions[id];
   s.muted = !s.muted;
-  // Cancel any speech in progress when muting
-  if (s.muted) fetch(TTS_BASE + '/cancel', { method: 'POST' }).catch(() => {});
-  // Tell T-Term server to mute/unmute TTS for this project
-  fetch('/api/mute', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ name: s.name, muted: s.muted })
-  }).catch(() => {});
+  // Stop voice player if muting
+  if (s.muted && typeof _vpStop === 'function') _vpStop();
   renderTabs();
   saveState();
 }
@@ -1496,10 +1518,6 @@ window.addEventListener('DOMContentLoaded', function init() {
       const sid = tab.name + (tab.isShell ? ':shell' : ':claude');
       if (sessions[sid] && tab.muted) {
         sessions[sid].muted = true;
-        fetch('/api/mute', {
-          method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ name: tab.name, muted: true })
-        }).catch(() => {});
       }
     }
     // Restore pane assignments
@@ -1530,7 +1548,7 @@ window.addEventListener('DOMContentLoaded', function init() {
 // ══════════════════════════════════════════
 //  Page Navigation
 // ══════════════════════════════════════════
-const PAGE_NAMES = ['Home', 'Dashboard', 'Admin'];
+const PAGE_NAMES = ['Home', 'Dashboard'];
 
 function goPage(idx) {
   idx = Math.max(0, Math.min(PAGE_NAMES.length - 1, idx));
@@ -1553,11 +1571,6 @@ function goPage(idx) {
   var clock = document.querySelector('.clock-wrap');
   if (clock) clock.style.opacity = idx === 0 ? '1' : '0';
 
-  // Lazy-load admin iframe
-  if (idx === 2) {
-    var frame = document.getElementById('adminFrame');
-    if (frame && !frame.src.includes('/admin')) frame.src = '/admin';
-  }
 }
 
 // Keyboard navigation for pages

@@ -259,7 +259,22 @@ module.exports = function createApiRouter(deps) {
 
         const messages = [];
         try {
-            const content = fs.readFileSync(latest, 'utf-8');
+            // Read only last 256KB of file for performance on large conversations
+            let content;
+            const stat = fs.statSync(latest);
+            const MAX_READ = 256 * 1024;
+            if (stat.size > MAX_READ) {
+                const fd = fs.openSync(latest, 'r');
+                const buf = Buffer.alloc(MAX_READ);
+                fs.readSync(fd, buf, 0, MAX_READ, stat.size - MAX_READ);
+                fs.closeSync(fd);
+                content = buf.toString('utf-8');
+                // Skip first partial line
+                const firstNewline = content.indexOf('\n');
+                if (firstNewline > 0) content = content.slice(firstNewline + 1);
+            } else {
+                content = fs.readFileSync(latest, 'utf-8');
+            }
             for (const line of content.split('\n')) {
                 if (!line.trim()) continue;
                 try {
@@ -656,26 +671,31 @@ module.exports = function createApiRouter(deps) {
             return true;
         }
 
-        // TTS proxy — forward to localhost:7123 so mobile can use TTS through Cloudflare
+        // ── TTS Proxy — forwards /api/tts/* to Kokoro on 127.0.0.1:7123 ──
         if (pathname.startsWith('/api/tts/')) {
-            const ttsPath = pathname.replace('/api/tts', '');
+            const kokoroPath = pathname.replace('/api/tts', '');
+            const body = await readBody(req);
             const http = require('http');
-            const ttsReq = http.request({
-                hostname: '127.0.0.1', port: 7123,
-                path: ttsPath, method: req.method,
-                headers: { 'Content-Type': req.headers['content-type'] || 'application/json' }
-            }, (ttsRes) => {
-                res.writeHead(ttsRes.statusCode, ttsRes.headers);
-                ttsRes.pipe(res);
+            const headers = { 'Content-Type': req.headers['content-type'] || 'application/json' };
+            if (body.length > 0) headers['Content-Length'] = body.length;
+            const kokoroReq = http.request({
+                hostname: '127.0.0.1',
+                port: 7123,
+                path: kokoroPath,
+                method: req.method,
+                headers,
+            }, (kokoroRes) => {
+                const resHeaders = { 'Content-Type': kokoroRes.headers['content-type'] || 'application/octet-stream' };
+                if (kokoroRes.headers['transfer-encoding']) resHeaders['Transfer-Encoding'] = kokoroRes.headers['transfer-encoding'];
+                res.writeHead(kokoroRes.statusCode, resHeaders);
+                kokoroRes.pipe(res);
             });
-            ttsReq.on('error', () => {
+            kokoroReq.on('error', () => {
                 sendJson(res, { error: 'TTS server unreachable' }, 502);
             });
-            if (req.method === 'POST') {
-                req.pipe(ttsReq);
-            } else {
-                ttsReq.end();
-            }
+            kokoroReq.setTimeout(30000);
+            if (body.length > 0) kokoroReq.write(body);
+            kokoroReq.end();
             return true;
         }
 

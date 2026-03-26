@@ -200,6 +200,12 @@ function createMessengerPane(sid, paneIdx, totalPanes) {
     }
   });
 
+  // Wire mic button — Whisper STT via NaturalVoice /transcribe
+  const micBtn = inputArea.querySelector('.mic-btn');
+  if (micBtn) {
+    micBtn.onclick = () => _sttToggle(micBtn, textarea);
+  }
+
   // Load conversation history
   if (sid && sessions[sid] && !sessions[sid].isShell && (!messengerMessages[sid] || messengerMessages[sid].length === 0)) {
     loadConversationHistory(sid, chatArea);
@@ -306,6 +312,7 @@ function isImagePath(text) {
 async function loadConversationHistory(sessionId, chatArea) {
   const s = sessions[sessionId];
   if (!s) return;
+  _vpLoadingHistory = true;
   try {
     // Load text messages from JSONL
     const resp = await fetch(`/api/conversation?name=${encodeURIComponent(s.name)}`);
@@ -334,31 +341,82 @@ async function loadConversationHistory(sessionId, chatArea) {
 
     // Sort by timestamp so images appear in the right position
     allItems.sort((a, b) => a.ts - b.ts);
+
+    // Store all items in memory
     for (const item of allItems) {
       if (item.type === 'image') {
         messengerMessages[sessionId].push({ role: 'user', type: 'image', blobUrl: item.url, time: item.time, ts: item.ts });
-        chatArea.appendChild(createImageBubble('user', item.url, item.time, null, item.ts));
       } else {
         messengerMessages[sessionId].push({ role: item.role, text: item.text, time: item.time });
-        chatArea.appendChild(createMsgBubble(item.role, item.text, item.time));
       }
     }
+
+    // Only render last 50 messages in the DOM
+    const MSG_LIMIT = 50;
+    const startIdx = Math.max(0, allItems.length - MSG_LIMIT);
+    const rendered = allItems.slice(startIdx);
+
+    // Add "load more" button if there's older history
+    if (startIdx > 0) {
+      const loadMore = document.createElement('div');
+      loadMore.className = 'load-more-btn';
+      loadMore.textContent = `Load ${startIdx} older messages`;
+      loadMore.dataset.sessionId = sessionId;
+      loadMore.dataset.startIdx = '0';
+      loadMore.dataset.endIdx = String(startIdx);
+      loadMore.onclick = () => {
+        const items = messengerMessages[sessionId];
+        const end = parseInt(loadMore.dataset.endIdx);
+        const batchStart = Math.max(0, end - MSG_LIMIT);
+        const batch = items.slice(batchStart, end);
+        const scrollBefore = chatArea.scrollHeight;
+        const frag = document.createDocumentFragment();
+        for (const m of batch) {
+          if (m.type === 'image') {
+            frag.appendChild(createImageBubble('user', m.blobUrl, m.time, null, m.ts));
+          } else {
+            frag.appendChild(createMsgBubble(m.role, m.text, m.time));
+          }
+        }
+        chatArea.insertBefore(frag, loadMore.nextSibling);
+        // Keep scroll position stable
+        chatArea.scrollTop += chatArea.scrollHeight - scrollBefore;
+        if (batchStart > 0) {
+          loadMore.textContent = `Load ${batchStart} older messages`;
+          loadMore.dataset.endIdx = String(batchStart);
+        } else {
+          loadMore.remove();
+        }
+      };
+      chatArea.appendChild(loadMore);
+    }
+
+    const frag = document.createDocumentFragment();
+    for (const item of rendered) {
+      if (item.type === 'image') {
+        frag.appendChild(createImageBubble('user', item.url, item.time, null, item.ts));
+      } else {
+        frag.appendChild(createMsgBubble(item.role, item.text, item.time));
+      }
+    }
+    chatArea.appendChild(frag);
     chatArea.scrollTop = chatArea.scrollHeight;
   } catch (e) { /* ignore fetch errors */ }
+  _vpLoadingHistory = false;
 }
 
 function renderMarkdown(text) {
-  // Escape HTML first
-  let html = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  // Escape HTML (single pass)
+  let html = text.replace(/[&<>]/g, c => c === '&' ? '&amp;' : c === '<' ? '&lt;' : '&gt;');
   // Code blocks (```)
   html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
   // Inline code
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-  // Headers (h1-h4)
-  html = html.replace(/^####\s+(.+)$/gm, '<h4 class="md-h">$1</h4>');
-  html = html.replace(/^###\s+(.+)$/gm, '<h3 class="md-h">$1</h3>');
-  html = html.replace(/^##\s+(.+)$/gm, '<h2 class="md-h">$1</h2>');
-  html = html.replace(/^#\s+(.+)$/gm, '<h1 class="md-h">$1</h1>');
+  // Headers (h1-h4) — single pass
+  html = html.replace(/^(#{1,4})\s+(.+)$/gm, (_, hashes, text) => {
+    const n = hashes.length;
+    return '<h' + n + ' class="md-h">' + text + '</h' + n + '>';
+  });
   // Bold
   html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   // Italic
@@ -391,9 +449,9 @@ function renderMarkdown(text) {
   html = html.replace(/^[-*]\s+(.+)$/gm, '<li>$1</li>');
   // Wrap consecutive <li> in <ul>
   html = html.replace(/((?:<li[^>]*>.*<\/li>\n?)+)/g, '<ul>$1</ul>');
-  // Line breaks (but not inside pre/ul/table)
+  // Line breaks
   html = html.replace(/\n/g, '<br>');
-  // Clean up <br> inside <ul>, <pre>, <table>
+  // Clean up <br> inside block elements (no lookbehind for Safari compat)
   html = html.replace(/<ul><br>/g, '<ul>');
   html = html.replace(/<br><\/ul>/g, '</ul>');
   html = html.replace(/<\/li><br>/g, '</li>');
@@ -402,7 +460,6 @@ function renderMarkdown(text) {
   html = html.replace(/<\/tr><br>/g, '</tr>');
   html = html.replace(/<table><br>/g, '<table>');
   html = html.replace(/<br><\/table>/g, '</table>');
-  // Clean up <br> around headers
   html = html.replace(/<br><(h[1-4])/g, '<$1');
   html = html.replace(/<\/(h[1-4])><br>/g, '</$1>');
   return html;
@@ -472,19 +529,565 @@ function createMsgBubble(role, text, time, extra) {
   return msg;
 }
 
-function readBubbleAloud(text, btn) {
-  if (btn.classList.contains('reading')) {
-    // Already reading — stop it
-    btn.classList.remove('reading');
-    fetch(TTS_BASE + '/cancel', { method: 'POST' }).catch(() => {});
+// ══════════════════════════════════════════
+//  Voice Player — sentence-by-sentence TTS with highlighting
+// ══════════════════════════════════════════
+let _vpAutoPlay = true;   // Auto-play TTS on new assistant messages
+let _vpLoadingHistory = false; // Suppress auto-play during history load
+const _vpQueue = [];      // Queue of { bubble, text, readBtn } for messages that arrive during playback
+let _vpSharedAudioCtx = null; // Shared AudioContext — created on first user gesture for iOS
+
+// Create/unlock AudioContext on any user interaction (iOS requires gesture)
+function _vpEnsureAudioCtx() {
+  if (!_vpSharedAudioCtx || _vpSharedAudioCtx.state === 'closed') {
+    _vpSharedAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (_vpSharedAudioCtx.state === 'suspended') _vpSharedAudioCtx.resume();
+  return _vpSharedAudioCtx;
+}
+document.addEventListener('touchstart', _vpEnsureAudioCtx, { once: false, passive: true });
+document.addEventListener('click', _vpEnsureAudioCtx, { once: false, passive: true });
+
+const _vp = {
+  sentences: [],
+  currentIndex: -1,
+  paused: false,
+  active: false,
+  bubbleEl: null,
+  btnEl: null,
+  generation: 0,
+  rawText: '',
+  abortCtrl: null,
+  audioEl: null, // Persistent <audio> element — plays in background tabs like YouTube
+};
+
+function _vpSplitSentences(text) {
+  // Split on sentence boundaries: . ! ? followed by space or end, plus newlines for paragraphs
+  const raw = text.replace(/\n{2,}/g, '\n').trim();
+  const parts = [];
+  // Split by lines first to respect paragraph structure
+  for (const line of raw.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    // Split line into sentences
+    const sents = trimmed.match(/[^.!?]+[.!?]+[\s]?|[^.!?]+$/g);
+    if (sents) {
+      for (const s of sents) {
+        const clean = s.trim();
+        if (clean.length > 2) parts.push(clean);
+      }
+    } else if (trimmed.length > 2) {
+      parts.push(trimmed);
+    }
+  }
+  return parts;
+}
+
+function _vpStart(bubble, rawText, btn, startIndex) {
+  _vpStop(); // Stop any existing playback
+  _vp.rawText = rawText;
+  // Get clean text from the bubble's rendered content (excluding buttons)
+  const clone = bubble.cloneNode(true);
+  clone.querySelectorAll('.bubble-read-btn, .bubble-copy-btn').forEach(el => el.remove());
+  const visibleText = clone.innerText || clone.textContent || '';
+  _vp.sentences = _vpSplitSentences(visibleText);
+  if (_vp.sentences.length === 0) return;
+  _vp.bubbleEl = bubble;
+  _vp.btnEl = btn;
+  _vp.active = true;
+  _vp.paused = false;
+  _vp.generation++;
+  _vp._lastHighlightEnd = 0;
+  // Show controller
+  const bar = document.getElementById('voiceBar');
+  if (bar) bar.classList.add('visible');
+  // Mark button as reading
+  if (btn) { btn.classList.add('reading'); }
+  // Add click-to-jump handler on bubble
+  bubble._vpClickHandler = (e) => {
+    if (e.target.closest('.bubble-read-btn, .bubble-copy-btn')) return;
+    if (!_vp.active || _vp.bubbleEl !== bubble) return;
+    _vpJumpToClick(e, bubble);
+  };
+  bubble.addEventListener('click', bubble._vpClickHandler);
+  _vpSpeakIndex(startIndex || 0);
+}
+
+// Persistent <audio> element — browsers keep these playing in background tabs (like YouTube)
+const _vpAudio = document.createElement('audio');
+_vpAudio.style.display = 'none';
+document.body.appendChild(_vpAudio);
+
+function _vpKillAudio() {
+  if (_vp.abortCtrl) { _vp.abortCtrl.abort(); _vp.abortCtrl = null; }
+  // Stop <audio> element (desktop)
+  _vpAudio.onended = null;
+  _vpAudio.pause();
+  if (_vpAudio.src) { URL.revokeObjectURL(_vpAudio.src); _vpAudio.removeAttribute('src'); }
+  // Stop AudioBufferSource (iOS)
+  if (_vp._currentSource) { try { _vp._currentSource.onended = null; _vp._currentSource.stop(); } catch(e) {} _vp._currentSource = null; }
+}
+
+function _vpStop(skipQueue) {
+  _vp.generation++;
+  _vpKillAudio();
+  _vpClearHighlight();
+  if (typeof inkNotifySpeakStop === 'function') inkNotifySpeakStop();
+  if (_vp.btnEl) _vp.btnEl.classList.remove('reading');
+  if (_vp.bubbleEl && _vp.bubbleEl._vpClickHandler) {
+    _vp.bubbleEl.removeEventListener('click', _vp.bubbleEl._vpClickHandler);
+    delete _vp.bubbleEl._vpClickHandler;
+  }
+  _vp.active = false;
+  _vp.bubbleEl = null;
+  _vp.btnEl = null;
+  _vp.sentences = [];
+  _vp.currentIndex = -1;
+  _vp.paused = false;
+  const bar = document.getElementById('voiceBar');
+  if (bar) bar.classList.remove('visible');
+  // Play next queued message if any
+  if (!skipQueue && _vpQueue.length > 0) {
+    const next = _vpQueue.shift();
+    if (next.bubble) {
+      setTimeout(() => _vpStart(next.bubble, next.text, next.readBtn, 0), 100);
+    } else {
+      _vpPlayAudioOnly(next.text);
+    }
+  }
+}
+
+function _vpPause() {
+  if (!_vp.active) return;
+  _vp.paused = true;
+  _vpAudio.pause();
+  _vpUpdateUI();
+}
+
+function _vpResume() {
+  if (!_vp.active) return;
+  _vp.paused = false;
+  _vpUpdateUI();
+  const idx = _vp.currentIndex >= 0 ? _vp.currentIndex : 0;
+  _vpSpeakIndex(idx);
+}
+
+function _vpTogglePause() {
+  if (!_vp.active) return;
+  _vp.paused ? _vpResume() : _vpPause();
+}
+
+function _vpNext() {
+  if (!_vp.active) return;
+  _vp.generation++;
+  _vpKillAudio();
+  _vp.paused = false;
+  const next = (_vp.currentIndex >= 0 ? _vp.currentIndex : 0) + 1;
+  if (next < _vp.sentences.length) _vpSpeakIndex(next);
+}
+
+function _vpPrev() {
+  if (!_vp.active) return;
+  _vp.generation++;
+  _vpKillAudio();
+  _vp.paused = false;
+  const prev = _vp.currentIndex > 0 ? _vp.currentIndex - 1 : 0;
+  _vpSpeakIndex(prev);
+}
+
+async function _vpSpeakIndex(index) {
+  if (!_vp.active || index >= _vp.sentences.length) {
+    _vpStop();
     return;
   }
-  btn.classList.add('reading');
-  fetch(TTS_BASE + '/speak', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text })
-  }).catch(() => {});
+  const gen = _vp.generation;
+  _vp.currentIndex = index;
+  _vpHighlight(index);
+  _vpUpdateUI();
+  if (typeof inkNotifySpeakStart === 'function') inkNotifySpeakStart();
+
+  _vpKillAudio();
+  _vp.abortCtrl = new AbortController();
+
+  try {
+    const resp = await fetch(TTS_BASE + '/synthesize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: _vp.sentences[index], voice: 'am_onyx', speed: 1.25 }),
+      signal: _vp.abortCtrl.signal,
+    });
+    if (!resp.ok) throw new Error('TTS ' + resp.status);
+
+    if (isIOS || isIPad) {
+      // iOS: use AudioContext (pre-unlocked by touch events) — <audio> autoplay is blocked
+      const wavBuf = await resp.arrayBuffer();
+      if (gen !== _vp.generation) return;
+      const ctx = _vpEnsureAudioCtx();
+      const audioBuf = await ctx.decodeAudioData(wavBuf);
+      const src = ctx.createBufferSource();
+      src.buffer = audioBuf;
+      src.connect(ctx.destination);
+      _vp._currentSource = src;
+      await new Promise(resolve => {
+        src.onended = () => { _vp._currentSource = null; resolve(); };
+        src.start(0);
+      });
+    } else {
+      // Desktop: use <audio> element — works in background tabs
+      const wavBlob = await resp.blob();
+      if (gen !== _vp.generation) return;
+      const blobUrl = URL.createObjectURL(wavBlob);
+      _vpAudio.src = blobUrl;
+      await new Promise((resolve, reject) => {
+        _vpAudio.onended = () => { URL.revokeObjectURL(blobUrl); resolve(); };
+        _vpAudio.onerror = () => { URL.revokeObjectURL(blobUrl); reject(new Error('audio error')); };
+        _vpAudio.play().catch(reject);
+      });
+    }
+    if (gen !== _vp.generation || _vp.paused) return;
+    _vpSpeakIndex(index + 1);
+  } catch(e) {
+    if (e.name === 'AbortError') return;
+    if (gen !== _vp.generation) return;
+    _vpSpeakIndex(index + 1);
+  }
+}
+
+function _vpHighlight(index) {
+  _vpClearHighlight();
+  if (!_vp.bubbleEl || index < 0 || index >= _vp.sentences.length) return;
+
+  const sentence = _vp.sentences[index];
+  const bubble = _vp.bubbleEl;
+  const walker = document.createTreeWalker(bubble, NodeFilter.SHOW_TEXT, null);
+  const textNodes = [];
+  while (walker.nextNode()) textNodes.push(walker.currentNode);
+
+  let fullText = '';
+  for (const tn of textNodes) fullText += tn.textContent;
+
+  // Cumulative offset — walk through all previous sentences to find position
+  // More reliable than indexOf which can match wrong occurrences
+  const normFull = fullText.replace(/\s+/g, ' ');
+  let cumOffset = 0;
+  for (let si = 0; si < index; si++) {
+    const prevNorm = _vp.sentences[si].replace(/\s+/g, ' ');
+    const foundAt = normFull.indexOf(prevNorm, cumOffset);
+    if (foundAt !== -1) {
+      cumOffset = foundAt + prevNorm.length;
+    } else {
+      cumOffset += prevNorm.length;
+    }
+  }
+  const normSent = sentence.replace(/\s+/g, ' ');
+  let normPos = normFull.indexOf(normSent, cumOffset);
+  if (normPos === -1) normPos = normFull.indexOf(normSent);
+  if (normPos === -1 && normSent.length > 40) normPos = normFull.indexOf(normSent.substring(0, 40), cumOffset);
+  if (normPos === -1 && normSent.length > 40) normPos = normFull.indexOf(normSent.substring(0, 40));
+  if (normPos === -1) return;
+
+  // Map normalized position back to original text
+  let sentPos = 0, ni = 0;
+  while (ni < normPos && sentPos < fullText.length) {
+    if (/\s/.test(fullText[sentPos])) {
+      sentPos++;
+      if (ni < normPos && normFull[ni] === ' ') ni++;
+      while (sentPos < fullText.length && /\s/.test(fullText[sentPos])) sentPos++;
+    } else { sentPos++; ni++; }
+  }
+
+  // Find text nodes and wrap matching range
+  let offset = 0;
+  for (const node of textNodes) {
+    const nodeEnd = offset + node.textContent.length;
+    const sentEnd = sentPos + sentence.length;
+    if (nodeEnd > sentPos && offset < sentEnd) {
+      const startInNode = Math.max(0, sentPos - offset);
+      const endInNode = Math.min(node.textContent.length, sentEnd - offset);
+      try {
+        const range = document.createRange();
+        range.setStart(node, startInNode);
+        range.setEnd(node, endInNode);
+        const span = document.createElement('span');
+        span.className = 'voice-highlight';
+        range.surroundContents(span);
+        const chatContainer = span.closest('.chat-messages');
+        if (chatContainer) {
+          const spanRect = span.getBoundingClientRect();
+          const containerRect = chatContainer.getBoundingClientRect();
+          if (spanRect.bottom > containerRect.bottom - 80 || spanRect.top < containerRect.top) {
+            span.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }
+        }
+      } catch(e) {}
+      break;
+    }
+    offset = nodeEnd;
+  }
+}
+
+function _vpClearHighlight() {
+  if (!_vp.bubbleEl) return;
+  _vp.bubbleEl.querySelectorAll('.voice-highlight').forEach(el => {
+    const parent = el.parentNode;
+    while (el.firstChild) parent.insertBefore(el.firstChild, el);
+    parent.removeChild(el);
+    parent.normalize();
+  });
+}
+
+function _vpJumpToClick(e, bubble) {
+  // Determine which sentence was clicked based on text position
+  const selection = window.getSelection();
+  if (!selection.anchorNode || !bubble.contains(selection.anchorNode)) return;
+
+  const clone = bubble.cloneNode(true);
+  clone.querySelectorAll('.bubble-read-btn, .bubble-copy-btn').forEach(el => el.remove());
+  const fullText = clone.innerText || clone.textContent || '';
+
+  try {
+    const range = document.createRange();
+    range.selectNodeContents(bubble);
+    range.setEnd(selection.anchorNode, selection.anchorOffset);
+    const charPos = range.toString().length;
+
+    let bestIndex = 0, pos = 0;
+    for (let i = 0; i < _vp.sentences.length; i++) {
+      const sentPos = fullText.indexOf(_vp.sentences[i], pos);
+      if (sentPos === -1) continue;
+      if (charPos >= sentPos && charPos <= sentPos + _vp.sentences[i].length) { bestIndex = i; break; }
+      if (sentPos > charPos) { bestIndex = Math.max(0, i - 1); break; }
+      pos = sentPos + _vp.sentences[i].length;
+      bestIndex = i;
+    }
+
+    _vp.generation++; // Kill any in-flight playback chain
+    _vpKillAudio();
+    _vp.paused = false;
+    _vpSpeakIndex(bestIndex);
+  } catch(ex) {}
+}
+
+function _vpUpdateUI() {
+  const counter = document.getElementById('vpCounter');
+  if (counter) {
+    const cur = _vp.currentIndex >= 0 ? _vp.currentIndex + 1 : 0;
+    counter.textContent = cur + ' / ' + _vp.sentences.length;
+  }
+  const ppBtn = document.getElementById('vpPlayPause');
+  if (ppBtn) ppBtn.textContent = _vp.paused ? '\u25B6' : '\u23F8';
+  // Progress bar
+  const total = _vp.sentences.length || 1;
+  const cur = _vp.currentIndex >= 0 ? _vp.currentIndex : 0;
+  const pct = total <= 1 ? 0 : Math.min(100, (cur / (total - 1)) * 100);
+  const fill = document.getElementById('vpProgress');
+  if (fill) fill.style.width = pct + '%';
+}
+
+function _vpTimelineClick(e) {
+  if (!_vp.active || _vp.sentences.length === 0) return;
+  const bar = document.getElementById('vpTimeline');
+  if (!bar) return;
+  const rect = bar.getBoundingClientRect();
+  const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  const index = Math.round(pct * (_vp.sentences.length - 1));
+  _vpKillAudio();
+  _vp.paused = false;
+  _vpSpeakIndex(index);
+}
+
+// Audio-only playback (no highlight) — for when the pane isn't visible
+async function _vpPlayAudioOnly(text) {
+  _vpStop();
+  _vp.sentences = _vpSplitSentences(text);
+  if (_vp.sentences.length === 0) return;
+  _vp.active = true;
+  _vp.paused = false;
+  _vp.generation++;
+  _vpSpeakIndex(0);
+}
+
+function readBubbleAloud(text, btn) {
+  if (_vp.active && _vp.btnEl === btn) {
+    // Toggle — stop if same bubble + clear queue
+    _vpQueue.length = 0;
+    _vpStop(true);
+    return;
+  }
+  const bubble = btn.closest('.msg-bubble');
+  if (!bubble) return;
+  _vpStart(bubble, text, btn, 0);
+}
+
+// ══════════════════════════════════════════
+//  STT — Whisper via NaturalVoice /transcribe
+// ══════════════════════════════════════════
+let _sttRecorder = null;
+let _sttChunks = [];
+let _sttStream = null;
+let _sttRecording = false;
+let _sttLockedTextarea = null; // Locked to the textarea when recording started
+let _sttLockedMicBtn = null;
+let _sttLockedSendFn = null;  // Send function captured at record start
+
+async function _sttToggle(micBtn, textarea) {
+  if (_sttRecording) {
+    _sttStop(micBtn, textarea);
+  } else {
+    _sttStart(micBtn, textarea);
+  }
+}
+
+async function _sttStart(micBtn, textarea, sendFn) {
+  if (_sttRecording) return;
+  _sttLockedTextarea = textarea;
+  _sttLockedMicBtn = micBtn;
+  _sttLockedSendFn = sendFn || null;
+  try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+    _sttStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    _sttRecorder = new MediaRecorder(_sttStream, { mimeType: 'audio/webm' });
+    _sttChunks = [];
+    _sttRecorder.ondataavailable = (e) => _sttChunks.push(e.data);
+    _sttRecorder.start();
+    _sttRecording = true;
+    if (micBtn) micBtn.classList.add('recording');
+  } catch(e) {
+    _sttRecording = false;
+  }
+}
+
+async function _sttStop(micBtn, textarea, autoSend) {
+  if (!_sttRecording || !_sttRecorder) return;
+  _sttRecording = false;
+  // Use locked references (from when recording started)
+  const targetTextarea = _sttLockedTextarea || textarea;
+  const targetMicBtn = _sttLockedMicBtn || micBtn;
+  const targetSendFn = _sttLockedSendFn;
+  if (targetMicBtn) targetMicBtn.classList.remove('recording');
+  return new Promise(resolve => {
+    _sttRecorder.onstop = async () => {
+      if (_sttStream) { _sttStream.getTracks().forEach(t => t.stop()); _sttStream = null; }
+      if (!_sttChunks.length) { resolve(''); return; }
+      const blob = new Blob(_sttChunks, { type: 'audio/webm' });
+      _sttChunks = [];
+      const text = await _sttTranscribe(blob);
+      if (text && targetTextarea) {
+        targetTextarea.value = targetTextarea.value ? targetTextarea.value + ' ' + text : text;
+        targetTextarea.focus();
+        targetTextarea.dispatchEvent(new Event('input'));
+        // Auto-send if push-to-talk
+        if (autoSend && targetSendFn) {
+          targetSendFn();
+        }
+      }
+      _sttLockedTextarea = null;
+      _sttLockedMicBtn = null;
+      _sttLockedSendFn = null;
+      resolve(text);
+    };
+    _sttRecorder.stop();
+  });
+}
+
+// ── Push-to-talk: hold Ctrl+Shift to record, release to send ──
+let _pttActive = false;
+
+function _pttGetActiveInput() {
+  // Find the active session's messenger textarea and send function
+  const sid = activeSessionId;
+  if (!sid || !sessions[sid]) return null;
+  // Find the visible pane for this session
+  const panes = document.querySelectorAll('.messenger-split-pane, .split-messenger');
+  for (const pane of panes) {
+    if (pane.dataset.sessionId !== sid) continue;
+    const textarea = pane.querySelector('.chat-textarea');
+    const sendBtn = pane.querySelector('.send-btn');
+    const micBtn = pane.querySelector('.mic-btn');
+    if (textarea && sendBtn) {
+      return { textarea, micBtn, sendFn: () => sendBtn.click() };
+    }
+  }
+  return null;
+}
+
+document.addEventListener('keydown', (e) => {
+  if (_pttActive) return;
+  // Catch Ctrl+Shift in either press order
+  if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && (e.key === 'Shift' || e.key === 'Control')) {
+    e.preventDefault();
+    _pttActive = true;
+    const target = _pttGetActiveInput();
+    if (target) {
+      _sttStart(target.micBtn, target.textarea, target.sendFn);
+    }
+  }
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Alt') return;
+  // Alt while recording = cancel (discard recording, don't send)
+  if (_pttActive) {
+    e.preventDefault();
+    _pttActive = false;
+    if (_sttRecording) {
+      _sttRecording = false;
+      if (_sttLockedMicBtn) _sttLockedMicBtn.classList.remove('recording');
+      if (_sttRecorder) _sttRecorder.stop();
+      if (_sttStream) { _sttStream.getTracks().forEach(t => t.stop()); _sttStream = null; }
+      _sttChunks = [];
+      _sttLockedTextarea = null;
+      _sttLockedMicBtn = null;
+      _sttLockedSendFn = null;
+    }
+    return;
+  }
+  // Alt while voice player is speaking = stop TTS + clear queue
+  if (_vp.active) {
+    e.preventDefault();
+    _vpQueue.length = 0;
+    _vpStop(true);
+  }
+});
+
+// Arrow keys to navigate sentences while voice player is active
+document.addEventListener('keydown', (e) => {
+  if (!_vp.active) return;
+  // Don't intercept if typing in a textarea/input
+  if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') return;
+  if (e.key === 'ArrowRight') {
+    e.preventDefault();
+    _vpNext();
+  } else if (e.key === 'ArrowLeft') {
+    e.preventDefault();
+    _vpPrev();
+  } else if (e.key === ' ') {
+    e.preventDefault();
+    _vpTogglePause();
+  }
+});
+
+document.addEventListener('keyup', (e) => {
+  if (!_pttActive) return;
+  if (e.key === 'Shift' || e.key === 'Control') {
+    _pttActive = false;
+    if (_sttRecording) {
+      _sttStop(null, null, true); // autoSend = true
+    }
+  }
+});
+
+async function _sttTranscribe(blob) {
+  const fd = new FormData();
+  fd.append('audio', blob, 'recording.webm');
+  try {
+    const resp = await fetch(TTS_BASE + '/transcribe', { method: 'POST', body: fd });
+    if (!resp.ok) return '';
+    const data = await resp.json();
+    return (data.text || '').trim();
+  } catch(e) {
+    return '';
+  }
 }
 
 // ══════════════════════════════════════════
@@ -1072,6 +1675,7 @@ function addMessengerMessage(sessionId, role, text, extra) {
   });
 
   // Render in any visible chat area for this session
+  let _autoPlayBubble = null;
   const allPanes = document.querySelectorAll('.messenger-split-pane, .split-messenger');
   for (const pane of allPanes) {
     const paneSid = pane.dataset.sessionId;
@@ -1087,12 +1691,44 @@ function addMessengerMessage(sessionId, role, text, extra) {
       } else {
         chatArea.appendChild(bubble);
       }
+      if (!_autoPlayBubble) _autoPlayBubble = bubble;
     } else {
       chatArea.appendChild(bubble);
     }
     // Only auto-scroll if user is locked to bottom (following chat)
     if (scrollLockedToBottom[paneSid] !== false) {
       chatArea.scrollTop = chatArea.scrollHeight;
+    }
+  }
+  // Auto-play TTS once (outside loop) for new live assistant messages
+  if (role === 'assistant' && _vpAutoPlay && !_vpLoadingHistory) {
+    const _isMuted = sessionId && sessions[sessionId] && sessions[sessionId].muted;
+    if (!_isMuted) {
+      if (_vp.active) {
+        // Queue for later — will play when current finishes
+        if (_autoPlayBubble) {
+          const readBtn = _autoPlayBubble.querySelector('.bubble-read-btn');
+          const msgBubble = _autoPlayBubble.querySelector('.msg-bubble') || _autoPlayBubble;
+          _vpQueue.push({ bubble: msgBubble, text: trimmed, readBtn });
+        } else {
+          _vpQueue.push({ bubble: null, text: trimmed, readBtn: null });
+        }
+      } else {
+        if (_autoPlayBubble) {
+          const readBtn = _autoPlayBubble.querySelector('.bubble-read-btn');
+          const msgBubble = _autoPlayBubble.querySelector('.msg-bubble') || _autoPlayBubble;
+          if (readBtn) {
+            const startPlay = () => _vpStart(msgBubble, trimmed, readBtn, 0);
+            if (document.hasFocus()) {
+              setTimeout(startPlay, 100);
+            } else {
+              queueMicrotask(startPlay);
+            }
+          }
+        } else {
+          _vpPlayAudioOnly(trimmed);
+        }
+      }
     }
   }
 }
@@ -1106,60 +1742,66 @@ const toolVerbs = {
   'SendMessage': 'Messaging agent...',
 };
 
+let _typingCache = {}; // { sessionId: { phase, toolCount, agents, tokens } }
+
 function showMessengerTyping(sessionId, show, tools, agents) {
   if (viewMode !== 'messenger' && viewMode !== 'split') return;
   const panes = document.querySelectorAll('.messenger-split-pane');
-  for (const pane of panes) {
-    if (pane.dataset.sessionId === sessionId) {
-      const chatArea = pane.querySelector('.chat-messages');
-      let existing = chatArea.querySelector('.typing');
-      if (show) {
-        if (!existing) {
-          existing = document.createElement('div');
-          existing.className = 'msg typing';
-          existing.title = 'Click to cancel';
-          existing.style.cursor = 'pointer';
-          existing.onclick = () => cancelClaude(sessionId);
-          chatArea.appendChild(existing);
-        }
-        // Determine current phase from the session state
-        const s = sessions[sessionId];
-        const lastTool = tools && tools.length > 0 ? tools[tools.length - 1] : null;
-        const phase = lastTool ? (toolVerbs[lastTool] || lastTool + '...') : 'Thinking...';
+  for (const p of panes) {
+    if (p.dataset.sessionId !== sessionId) continue;
+    const ca = p.querySelector('.chat-messages');
+    if (ca) { _showTypingInArea(sessionId, ca, show, tools, agents); }
+  }
+}
 
-        let html = '<div class="typing-row">';
-        // Phase status (replaces dots)
-        html += '<div class="typing-status"><span class="status-text">' + phase + '</span></div>';
-        // Tool history badges
-        if (tools && tools.length > 0) {
-          html += '<div class="typing-tools">';
-          for (const t of tools) {
-            const isAgent = t === 'Agent';
-            html += '<span class="tool-badge' + (isAgent ? ' agent' : '') + '">' + t + '</span>';
-          }
-          html += '</div>';
-        }
-        if (agents && agents > 0) {
-          html += '<span class="agent-count">' + agents + ' agent' + (agents > 1 ? 's' : '') + '</span>';
-        }
-        // Token count if available
-        if (s && s._currentResponseTokens > 0) {
-          html += '<span class="token-count">' + s._currentResponseTokens + ' tok</span>';
-        }
-        html += '</div>';
-        existing.innerHTML = html;
-        if (scrollLockedToBottom[sessionId] !== false) chatArea.scrollTop = chatArea.scrollHeight;
-      } else if (!show && existing) {
-        existing.remove();
-      }
+function _showTypingInArea(sessionId, chatArea, show, tools, agents) {
+  let existing = chatArea.querySelector('.typing');
+  if (show) {
+    if (!existing) {
+      existing = document.createElement('div');
+      existing.className = 'msg typing';
+      existing.title = 'Click to cancel';
+      existing.style.cursor = 'pointer';
+      existing.onclick = () => cancelClaude(sessionId);
+      chatArea.appendChild(existing);
     }
+    const s = sessions[sessionId];
+    const lastTool = tools && tools.length > 0 ? tools[tools.length - 1] : null;
+    const phase = lastTool ? (toolVerbs[lastTool] || lastTool + '...') : 'Thinking...';
+    const toolCount = tools ? tools.length : 0;
+    const tokens = s ? s._currentResponseTokens || 0 : 0;
+
+    // Skip DOM update if nothing changed
+    const cache = _typingCache[sessionId];
+    if (cache && cache.phase === phase && cache.toolCount === toolCount && cache.agents === agents && cache.tokens === tokens) {
+      return;
+    }
+    _typingCache[sessionId] = { phase, toolCount, agents, tokens };
+
+    let html = '<div class="typing-row"><div class="typing-status"><span class="status-text">' + phase + '</span></div>';
+    if (toolCount > 0) {
+      html += '<div class="typing-tools">';
+      for (const t of tools) html += '<span class="tool-badge' + (t === 'Agent' ? ' agent' : '') + '">' + t + '</span>';
+      html += '</div>';
+    }
+    if (agents > 0) html += '<span class="agent-count">' + agents + ' agent' + (agents > 1 ? 's' : '') + '</span>';
+    if (tokens > 0) html += '<span class="token-count">' + tokens + ' tok</span>';
+    html += '</div>';
+    existing.innerHTML = html;
+    if (scrollLockedToBottom[sessionId] !== false) chatArea.scrollTop = chatArea.scrollHeight;
+  } else if (!show && existing) {
+    existing.remove();
+    delete _typingCache[sessionId];
   }
 }
 
 function showPromptNotification(sessionId) {
-  const panes = document.querySelectorAll('.messenger-split-pane');
-  for (const pane of panes) {
-    if (pane.dataset.sessionId === sessionId) {
+  // Use cached pane first, fallback to DOM scan
+  const cached = cachedPanes[sessionId];
+  const panesArr = cached ? [cached] : document.querySelectorAll('.messenger-split-pane');
+  for (const pane of panesArr) {
+    if (pane.dataset.sessionId !== sessionId) continue;
+    {
       const chatArea = pane.querySelector('.chat-messages');
       if (!chatArea) continue;
       // Remove any existing prompt notification
