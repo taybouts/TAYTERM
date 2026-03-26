@@ -1,5 +1,79 @@
 # T-Term Patch Notes
 
+## v3.0.0 — Browser Voice Player, Whisper STT, Ink Voice UI & Performance
+_Released: 2026-03-26_
+
+### New Features
+- **Browser Voice Player** — sentence-by-sentence TTS using Kokoro `/synthesize` endpoint. Plays WAV audio via `<audio>` element (desktop, works in background tabs) or AudioContext (iOS, pre-unlocked on first touch). Sentence highlighting with cumulative offset tracking, controller bar (prev/pause/next/stop/timeline/counter), click-to-jump in bubble text, auto-play on new assistant messages with message queue system.
+- **Whisper STT** — replaced browser SpeechRecognition on all devices (desktop, iPad, iPhone) with Whisper via NaturalVoice `/transcribe`. MediaRecorder captures webm, sends through `/api/tts` proxy.
+- **Push-to-Talk (desktop)** — hold Ctrl+Shift to record, release to auto-send. Works regardless of which key is pressed first. Locks to the active tab's textarea at record start (survives tab switching while recording).
+- **Alt key controls** — Alt while recording cancels (discards audio). Alt while voice playing stops TTS. Alt clears the message queue.
+- **Arrow key navigation** — Left/Right skip sentences while voice player is active. Space pauses/resumes. Only when not typing in a textarea.
+- **Ink Voice UI** — full-screen canvas-based voice interface for mobile. 4 switchable visual effects (ink, fluid, aurora, membrane). Tap anywhere to start/stop recording. Ambient particles when idle, cyan particles when AI speaks, amber particles when user records. OLED-friendly 0.08 alpha fade. Effect cycle button at bottom, CHAT button to toggle back to messenger.
+- **`/api/tts/*` proxy** — T-Term server proxies all TTS/STT requests to NaturalVoice on port 7123. Buffers request body, forwards with Content-Length. Handles both JSON (synthesize) and multipart FormData (transcribe). Eliminates mixed-content and CORS issues.
+- **Mobile auto-play TTS** — new assistant messages on iPhone auto-play with highlights via voice player.
+- **Mobile send while recording** — tap send during recording: stops, transcribes, auto-sends immediately.
+- **Mobile mic cancel** — tap mic button again while recording to discard audio.
+- **50-message DOM limit** — desktop and mobile load only last 50 messages, with "Load X older messages" button. All messages stored in memory for search/stars.
+
+### Improvements
+- **Browser-side mute** — mute toggle no longer calls server `/api/mute` or NaturalVoice. Pure client-side `sessions[id].muted` flag. Stops voice player on mute.
+- **NaturalVoice muted for all projects** — all projects muted for speaker output. Each browser app owns its own audio playback.
+- **iPad send button fix** — was referencing deleted `ipadIsRecording` variable, replaced with shared `_sttRecording`.
+- **iPad voice input** — replaced browser SpeechRecognition with shared Whisper STT (`_sttToggle`).
+- **TTY view re-fit** — stores fitAddon reference, re-fits terminal on view toggle (was blank before).
+- **Viewport zoom lock** — `maximum-scale=1, user-scalable=no` for iOS PWA.
+
+### Performance
+- **`saveState()` debounced** — 500ms debounce instead of synchronous on every action (was called 7+ times per interaction).
+- **`renderTabs()` diff-in-place** — updates existing tab DOM elements instead of clearing and rebuilding. Debounced via `requestAnimationFrame`.
+- **`showMessengerTyping()` cached** — skips DOM update if phase/tools/tokens unchanged. Uses cached pane references.
+- **DocumentFragment batch append** — history loads use fragment instead of individual appendChild calls.
+- **`/api/conversation` tail-read** — reads only last 256KB of JSONL file instead of full file.
+- **`renderMarkdown()` optimized** — single-pass HTML escape, combined header regex (4→1), still has 11 br-cleanup passes (lookbehind not Safari-compatible).
+- **JSONL watcher 30ms debounce** — batches rapid file change events instead of firing on every line.
+
+### Architecture
+- `static/ink.js` — new file, 4 canvas-based visual effects with particle system
+- `static/messenger.js` — voice player (`_vp*`), STT (`_stt*`), push-to-talk (`_ptt*`), message queue (`_vpQueue`)
+- `routes/api.js` — `/api/tts/*` proxy route with body buffering
+- `TTS_BASE` — always proxied through server (`window.location.origin + '/api/tts'`), no more direct `:7123` access
+- iOS audio: AudioContext pre-unlocked on touch/click events, reused across sentences
+- Desktop audio: `<audio>` element (persistent, hidden), plays in background tabs
+- Voice player generation counter prevents stale playback chains
+- `docs/voice-player-reference.md` — full implementation reference for cross-app sharing
+
+### Known Issues
+- **Legal double voice** — Legal tab in T-Term plays audio twice. Muting Legal's T-Term tab doesn't stop it. Only muting Chrome browser tab stops it. Under investigation.
+- **Highlight consistency** — cumulative offset approach works well but occasionally skips on complex markdown.
+- **Double paste on Ctrl+V** — reported on desktop, not investigated.
+
+---
+
+## v2.0.0 — Code Split, Auth Overhaul, Multi-Device, iPad Support
+_Released: 2026-03-25_
+
+### New Features
+- **Code split** — server.js 1730→345, auth.js 2976→1389, app.js 3748→1636. New files: messenger.js, views.js, mobile.js, ipad.js, lib/daemon-client.js, lib/jsonl-reader.js, lib/tts-tap.js, lib/utils.js, routes/api.js, routes/static.js, routes/ws.js, templates/*.js
+- **Auth overhaul** — removed subnet bypass, removed whitelist auto-trust, passkey-only. Localhost bypass kept.
+- **Multi-device auth** — iPhone + iPad registered via invite flow
+- **Multi-device reattach** — openSession checks daemon for live PTY, no more killing active sessions
+- **Multi-device broadcast** — user input sent to all subscribers, all devices see messages immediately
+- **iPad support** — ipad.js with PWA safe areas, photo picker, voice input (mic), visibilitychange reconnect, connection badge
+- **JSONL watcher overhaul** — dir watcher for both new files AND modifications, no polling
+- **Prompt notification** — "Waiting for your input" badge on > prompt
+- **Messenger improvements** — copy button, speaker fix, mute cancels speech, history preserved on tab close, screenshot paste
+- **New session options** — "Clear & New" vs "Keep History"
+- **Rich audit logging** — who/device/project on connect/reattach/disconnect
+
+### Architecture
+- Modular file structure: server.js is thin orchestrator, logic in lib/ and routes/
+- Templates in templates/ (admin, login, register, invite pages)
+- Device detection: isIOS, isIPad, isMobile, connIsLocal/Tailscale/Cloudflare
+- Three client targets: app.js (desktop), mobile.js (iPhone), ipad.js (iPad)
+
+---
+
 ## v1.0.0 — PTY Daemon, Session Persistence & Email Invites
 _Released: 2026-03-24_
 

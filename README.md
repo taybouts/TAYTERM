@@ -45,13 +45,34 @@ Hover the right edge to reveal the utility panel:
 - **Sessions** — browse all JSONL conversations with token counts, click to preview, resume/delete/favorite
 - **Notes** — per-project or general quick notes
 
-### Zero-Noise TTS
+### Browser Voice Player
 
-Text-to-speech powered by structured JSONL data — not screen scraping. Claude's actual words, nothing else.
+Text-to-speech powered by Kokoro — sentence by sentence with live text highlighting.
 
-- Block-by-block delivery — hear each response as Claude writes it
-- Claim system prevents double-speech across multiple consumers
-- Per-tab mute, per-project voice selection via right-click menu
+- **Sentence highlighting** — current sentence underlined in blue, tracks through the text as it speaks
+- **Click-to-jump** — click anywhere in a bubble to jump to that sentence
+- **Controller bar** — prev/pause/next/stop, timeline scrub, sentence counter
+- **Auto-play** — new assistant messages play automatically with message queue
+- **Background playback** — keeps playing when browser tab isn't focused
+- **Per-tab mute** — browser-side, per-project voice selection via right-click menu
+- **Keyboard controls** — Arrow left/right (sentences), Space (pause), Alt (stop)
+
+### Whisper STT
+
+Voice input powered by WhisperX — accurate transcription for technical terms and code.
+
+- **Push-to-talk** — hold Ctrl+Shift to record, release to auto-send
+- **Mic button** — tap to record, tap send to transcribe + send
+- **All devices** — desktop, iPhone, iPad all use Whisper (no browser SpeechRecognition)
+
+### Ink Voice UI (Mobile)
+
+Full-screen voice-first interface for hands-free use:
+
+- **4 visual effects** — Ink, Fluid, Aurora, Membrane (tap to cycle)
+- **Tap anywhere** — start/stop recording, no mic button needed
+- **OLED-optimized** — true black background, particles fade cleanly
+- **AI visualization** — cyan particles when Claude speaks, amber when you record
 
 ### Screenshots & Images
 
@@ -102,16 +123,26 @@ Paste or capture a screenshot — it appears as an inline image bubble. Click to
 
 ## Architecture
 
-### Three-Process Model (v1.0.0+)
+### Three-Process Model (v3.0.0)
 
 ```
 pty-daemon.js          PTY Daemon — owns all terminal processes (port 7779)
                        Dashboard at port 7780
-server.js              T-Term Server — WebSocket bridge, JSONL watcher, TTS (port 7778)
+server.js              T-Term Server — WebSocket bridge, JSONL watcher, TTS/STT proxy (port 7778)
 auth.js                Auth system — QR, passkeys, admin, whitelist, audit, email invites
+routes/api.js          REST API + /api/tts/* proxy to NaturalVoice
+routes/ws.js           WebSocket handler
+routes/static.js       Static file serving
+lib/jsonl-reader.js    JSONL file watcher (30ms debounced)
+lib/tts-tap.js         TTSTap (server-side TTS, now muted — browser owns audio)
+lib/daemon-client.js   TCP client for PTY daemon
 pty-client.js          CLI tool — attach any terminal to a daemon PTY
-static/index.html      Single-page app shell
-static/app.js          Frontend — messenger, terminal, mobile, pane management
+static/app.js          Frontend — tabs, sessions, connection detection
+static/messenger.js    Messenger UI, voice player, Whisper STT, push-to-talk
+static/mobile.js       iPhone chat interface
+static/ipad.js         iPad overrides (photo picker, mic, connection badge)
+static/ink.js          Ink Voice UI — 4 canvas effects for mobile voice-first mode
+static/views.js        Layout management (split panes)
 static/style.css       Design system (blue flavor)
 tterm_tray.pyw         System tray launcher
 ```
@@ -127,15 +158,16 @@ PTY Daemon (port 7779)
 T-Term Server (port 7778)
     ├── connects to daemon as TCP client
     ├── bridges WebSocket ↔ daemon PTY I/O
-    ├── watches JSONL files (fs.watch on directory)
-    │       ├── WebSocket → Desktop messenger
-    │       ├── WebSocket → Mobile PWA
-    │       └── TTSTap → NaturalVoice TTS
+    ├── watches JSONL files (fs.watch, 30ms debounce)
+    │       └── WebSocket → all subscribers (desktop, mobile, iPad)
+    ├── /api/tts/* proxy → NaturalVoice :7123
     └── recoverDaemonSessions() on startup
 
-Browser ← WebSocket ← PTY raw output (terminal view, via daemon)
+Browser ← WebSocket ← PTY raw output (terminal view)
 Browser ← WebSocket ← JSONL parsed (messenger view)
 Browser → WebSocket → daemon PTY (user input)
+Browser → /api/tts/synthesize → NaturalVoice → WAV audio
+Browser → /api/tts/transcribe → NaturalVoice → Whisper STT
 ```
 
 ### Routing
@@ -186,7 +218,7 @@ Part of the **T-Server** ecosystem. Shares the design language with T-Legal, T-V
 - 2-column favorites grid with large icons
 - Real-time chat sync with desktop
 - Photo upload (camera roll or camera)
-- Voice input via native speech recognition
+- Voice input via Whisper STT
 - Thinking indicator + tool badges
 - TTY toggle for terminal view
 - Safe area support (Dynamic Island, home indicator)
@@ -234,8 +266,9 @@ Part of the **T-Server** ecosystem. Shares the design language with T-Legal, T-V
 | `/api/session` | DELETE | Delete a JSONL session file |
 | `/api/session-star` | POST | Favorite/unfavorite sessions |
 | `/api/notes` | GET/POST | Per-project or global notes |
-| `/api/mute` | POST | Mute/unmute TTS for a session |
+| `/api/mute` | POST | (Legacy) Mute TTS — now browser-side only |
 | `/api/stats` | GET | Token/context stats for a session |
+| `/api/tts/*` | * | Proxy to NaturalVoice :7123 (synthesize, transcribe, etc.) |
 | `/upload` | POST | File/screenshot/photo upload |
 | `/admin` | GET | Admin panel |
 | `/admin/devices` | GET | Registered passkeys + user info |
