@@ -237,19 +237,15 @@ module.exports = function createApiRouter(deps) {
 
         let latest = null;
         const sessionKey = name + ':claude';
+        // Primary: use the JSONL the server is actively watching
         if (activeTerminals[sessionKey] && activeTerminals[sessionKey].jsonlPath) {
             latest = activeTerminals[sessionKey].jsonlPath;
-        } else {
-            let latestMtime = 0;
-            const files = fs.readdirSync(convDir).filter(f => f.endsWith('.jsonl'));
-            for (const fname of files) {
-                const fpath = path.join(convDir, fname);
-                const mt = fs.statSync(fpath).mtimeMs;
-                if (mt > latestMtime) {
-                    latestMtime = mt;
-                    latest = fpath;
-                }
-            }
+        }
+        // Allow explicit ?session= param for browsing old sessions
+        const explicitSession = url.searchParams.get('session') || '';
+        if (explicitSession) {
+            const candidatePath = path.join(convDir, explicitSession + '.jsonl');
+            if (fs.existsSync(candidatePath)) latest = candidatePath;
         }
 
         if (!latest) {
@@ -259,10 +255,10 @@ module.exports = function createApiRouter(deps) {
 
         const messages = [];
         try {
-            // Read only last 256KB of file for performance on large conversations
+            // Read only last portion of file for performance on large conversations
             let content;
             const stat = fs.statSync(latest);
-            const MAX_READ = 256 * 1024;
+            const MAX_READ = 2 * 1024 * 1024; // 2MB — enough for most conversations
             if (stat.size > MAX_READ) {
                 const fd = fs.openSync(latest, 'r');
                 const buf = Buffer.alloc(MAX_READ);
@@ -337,6 +333,33 @@ module.exports = function createApiRouter(deps) {
     return async function handleApiRoute(req, res, pathname) {
         if (req.method === 'GET' && pathname === '/api/projects') {
             handleApiProjects(req, res);
+            return true;
+        }
+
+        if (req.method === 'GET' && pathname === '/api/connection-info') {
+            const cfIp = req.headers['cf-connecting-ip'] || '';
+            const cfRay = req.headers['cf-ray'] || '';
+            const cfCountry = req.headers['cf-ipcountry'] || '';
+            const xForward = req.headers['x-forwarded-for'] || '';
+            const realIp = cfIp || xForward.split(',')[0]?.trim() || req.socket.remoteAddress || '';
+            const directIp = req.socket.remoteAddress || '';
+            const isCF = !!cfRay;
+            const isPrivate = /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1|fe80)/.test(realIp);
+            const isDirectLocal = /^(127\.|::1|::ffff:127\.)/.test(directIp) || directIp === '::1';
+            let route = 'unknown';
+            if (!isCF && isDirectLocal) route = 'local';
+            else if (!isCF && !isDirectLocal) route = 'tailscale';
+            else if (isCF && isPrivate) route = 'cf-lan';
+            else if (isCF) route = 'cf-remote';
+            sendJson(res, {
+                route,
+                cloudflare: isCF,
+                clientIp: realIp,
+                directIp,
+                cfRay: cfRay || null,
+                cfCountry: cfCountry || null,
+                localNetwork: isPrivate,
+            });
             return true;
         }
 
@@ -671,7 +694,34 @@ module.exports = function createApiRouter(deps) {
             return true;
         }
 
-        // ── TTS Proxy — forwards /api/tts/* to Kokoro on 127.0.0.1:7123 ──
+        // ── Project Settings (icon + color per project) ──
+        if (req.method === 'GET' && pathname === '/api/project-settings') {
+            const file = path.join(BASE_DIR, '.tterm_project_settings.json');
+            try {
+                const data = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf-8')) : {};
+                sendJson(res, data);
+            } catch(e) { sendJson(res, {}); }
+            return true;
+        }
+
+        if (req.method === 'POST' && pathname === '/api/project-settings') {
+            const file = path.join(BASE_DIR, '.tterm_project_settings.json');
+            const body = await readBody(req);
+            try {
+                const incoming = JSON.parse(body.toString('utf-8'));
+                // Merge with existing
+                let existing = {};
+                try { existing = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf-8')) : {}; } catch(e) {}
+                const projectName = incoming.project;
+                if (!projectName) { sendJson(res, { error: 'missing project' }, 400); return true; }
+                existing[projectName] = { icon: incoming.icon || null, color: incoming.color || null };
+                fs.writeFileSync(file, JSON.stringify(existing, null, 2));
+                sendJson(res, { ok: true });
+            } catch(e) { sendJson(res, { error: 'invalid data' }, 400); }
+            return true;
+        }
+
+        // ── TTS Proxy — forwards /api/tts/* to T-Voice on 127.0.0.1:5011 ──
         if (pathname.startsWith('/api/tts/')) {
             const kokoroPath = pathname.replace('/api/tts', '');
             const body = await readBody(req);
@@ -680,7 +730,7 @@ module.exports = function createApiRouter(deps) {
             if (body.length > 0) headers['Content-Length'] = body.length;
             const kokoroReq = http.request({
                 hostname: '127.0.0.1',
-                port: 7123,
+                port: 5011,
                 path: kokoroPath,
                 method: req.method,
                 headers,

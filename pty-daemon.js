@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // ═══════════════════════════════════════════════════════════════════════════
-//  T-Term PTY Daemon — Owns all PTY processes, survives server restarts
+//  T-Daemon — PTY process manager — Owns all PTY processes, survives server restarts
 // ═══════════════════════════════════════════════════════════════════════════
 
 const net = require('net');
@@ -8,7 +8,7 @@ const pty = require('node-pty');
 const os = require('os');
 const path = require('path');
 
-const PORT = 7779;
+const PORT = 5041;
 const HOST = '127.0.0.1';
 const SCROLLBACK_LIMIT = 64 * 1024; // 64KB per session
 
@@ -247,6 +247,7 @@ const server = net.createServer((socket) => {
                 const msg = JSON.parse(line);
                 handleMessage(socket, msg);
             } catch (e) {
+                log(`Invalid JSON from client: ${JSON.stringify(line.slice(0, 200))}`);
                 send(socket, { type: 'error', message: 'Invalid JSON' });
             }
         }
@@ -273,13 +274,13 @@ server.listen(PORT, HOST, () => {
 });
 
 // ═══════════════════════════════════════════
-//  HTTP Dashboard — port 7780
+//  HTTP Dashboard — port 5042
 // ═══════════════════════════════════════════
 const http = require('http');
 
 // Log buffer is populated by the log() function defined at the top
 
-const DASH_PORT = 7780;
+const DASH_PORT = 5042;
 
 function getSessionsJson() {
     const list = [];

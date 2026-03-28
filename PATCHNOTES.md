@@ -1,5 +1,38 @@
 # T-Term Patch Notes
 
+## v4.0.0 — JSONL Protocol, Project Customization, Port Migration & Infrastructure
+_Released: 2026-03-28_
+
+### New Features
+- **JSONL Source-of-Truth Protocol** — Server sends `jsonl-ready` and `jsonl-cleared` WebSocket messages. Messenger waits for server confirmation before loading history. Replaces old `isFresh` heuristic and mtime-based JSONL guessing. Terminal is the single source of truth for conversation data.
+- **Project Appearance Picker** — Edit icon and color for any project. Glass modal with 50+ SVG icon library (categorized: App, Dev, Audio, Network, Business, Science, etc.), 24-color palette + custom hex picker, live preview. Saved to `.tterm_project_settings.json` via `/api/project-settings`.
+- **Connection Route Detection** — `/api/connection-info` API checks Cloudflare headers (`CF-Ray`, `CF-Connecting-IP`) to determine actual routing: `local` (LAN direct), `tailscale` (VPN), `cf-lan` (Cloudflare but local network), `cf-remote` (Cloudflare remote). iPad badge updates from server-side detection.
+- **User Message Markdown** — User bubbles now render markdown (tables, code, bold, lists, headers, links). White-on-blue adapted styling for tables/code in user bubbles.
+
+### Improvements
+- **Port Migration** — T-Term 5044, PTY Daemon 5041/5042, T-Voice proxy 5011, Gateway 5000. All internal references updated. PM2 configured with `--port 5044`.
+- **PTY Daemon Relocated** — Standalone at `T-Admin/T-Daemon/` with own `node_modules` (node-pty). Launched by `lib/daemon-client.js` with `cwd` set to daemon folder.
+- **PM2 Process Manager** — T-Term server managed by PM2 with auto-restart on crash (10 max, 3s delay). `pm2 save` for resurrect on login.
+- **TTSTap Disabled** — Server-side TTS (`lib/tts-tap.js`) now defaults to `muted=true`. Was causing double voice: browser played via `/synthesize` AND server played via T-Voice `/speak`.
+- **Duplicate Daemon Connection Fix** — `connectToDaemon()` tracks `wasConnected` flag. Close handler only auto-reconnects if previously connected. Stale sockets destroyed, data handler ignores non-current sockets.
+- **Icon Sizes Increased** — Project cards: 44px (was 32px). Favorites: 60px (was 48px). Mobile favorites: 80px (was 72px). Stroke-width 2 (was 1.5). Icon picker grid 7-col with 28px SVGs.
+- **Dashboard Performance** — `rerenderDashboard()` for pin/unpin/move/appearance-save uses cached data (no network calls). Animation suppression on re-render (`body.no-intro .project-card, .fav-item`).
+- **Scroll Lock** — `chatArea._scrollToBottom()` marks programmatic scrolls so the scroll listener doesn't flip `scrollLockedToBottom`. Scrolling up during active conversation stays up.
+- **Bulk Restore** — `window._bulkRestore` flag suppresses rendering during tab restore loop. One clean render at end with correct pane assignments.
+- **History Load** — `/api/conversation` reads last 2MB (was 256KB). Max 200 messages. Cache cleared on restore.
+- **Tab Speaking** — Static glow replaces blinking CSS animation. Close button always visible at 30% opacity.
+- **Table Separator Fix** — Per-cell `---` detection replaces whole-row regex (handles varied table formats).
+- **Renamed** — TAYTERM → T-Term, NaturalVoice → T-Voice across all code, config, and favorites.
+
+### Architecture
+- **JSONL Protocol** — `attachToJsonl()` in `jsonl-reader.js` broadcasts `{type: 'jsonl-ready', sessionId}` to all WebSocket subscribers. `_clearSession()` broadcasts `{type: 'jsonl-cleared'}`. Client uses `sessions[id]._jsonlSessionId` instead of `isFresh` to gate history loading.
+- **API Changes** — `/api/conversation` no longer falls back to mtime scan. Uses `entry.jsonlPath` or explicit `?session=` param. Returns empty if no JSONL attached. New endpoints: `/api/project-settings` (GET/POST), `/api/connection-info` (GET).
+- **WebSocket** — `ws.js` sends `jsonl-ready` immediately on reattach if `entry.jsonlPath` exists. New subscribers get current JSONL state on connect.
+- **Daemon Client** — Spawns daemon from `T-Admin/T-Daemon/` with `cwd: daemonDir`. Guard against stale sockets via `wasConnected` flag.
+- **Gateway Auth** — New `lib/gateway-auth.js` for Cloudflare-proxied authentication via taybouts.com gateway.
+
+---
+
 ## v3.0.0 — Browser Voice Player, Whisper STT, Ink Voice UI & Performance
 _Released: 2026-03-26_
 
@@ -78,8 +111,8 @@ _Released: 2026-03-25_
 _Released: 2026-03-24_
 
 ### New Features
-- **PTY Daemon** (`pty-daemon.js`) — standalone background process that owns all PTY instances. Terminal sessions survive T-Term server restarts. TCP protocol on port 7779 (NDJSON: spawn, attach, detach, write, resize, kill, list).
-- **Daemon Dashboard** — glass-themed web UI at `http://127.0.0.1:7780` showing active PTY sessions, live daemon log, peek into terminal scrollback, kill buttons.
+- **PTY Daemon** (`pty-daemon.js`) — standalone background process that owns all PTY instances. Terminal sessions survive T-Term server restarts. TCP protocol on port 5041 (NDJSON: spawn, attach, detach, write, resize, kill, list).
+- **Daemon Dashboard** — glass-themed web UI at `http://127.0.0.1:5042` showing active PTY sessions, live daemon log, peek into terminal scrollback, kill buttons.
 - **PTY Client CLI** (`pty-client.js`) — attach any terminal to a daemon-managed PTY: `node pty-client.js attach TAYTERM:claude`. Also: list, spawn, kill.
 - **Server Restart Recovery** — `recoverDaemonSessions()` discovers live PTYs from daemon on server startup, rebuilds `activeTerminals`, reattaches JSONL watchers. Zero downtime.
 - **Browser Auto-Reconnect** — `ws.onclose` automatically reconnects with `continue=1`. Named function handlers (`handleWsMessage`, `handleWsClose`) survive WebSocket replacement.
@@ -91,7 +124,7 @@ _Released: 2026-03-24_
 - **Empty Enter sends \r** — pressing Enter in messenger with empty text submits whatever is in the terminal input line (for confirming screenshots, plans, etc.)
 
 ### Architecture
-- **Three-process model**: PTY Daemon (port 7779) → T-Term Server (port 7778) → Browser Client. Server is now a viewer/bridge — no direct `node-pty` usage.
+- **Three-process model**: PTY Daemon (port 5041) → T-Term Server (port 5040) → Browser Client. Server is now a viewer/bridge — no direct `node-pty` usage.
 - **`server.js`**: Removed `require('node-pty')`. Added `DaemonClient` (TCP connection, NDJSON parsing, event routing). All `entry.pty.*` calls replaced with `daemonWrite/daemonResize/daemonKill`. `entry.alive` boolean replaces `entry.pty` truthiness. `ensureDaemon()` auto-starts daemon. `recoverDaemonSessions()` rebuilds state on startup.
 - **`pty-daemon.js`**: TCP server (`net.createServer`), session map (sessionKey → pty + subscribers + scrollback), HTTP dashboard server. 64KB scrollback ring buffer per session. Graceful shutdown kills all PTYs.
 - **JSONL Watcher overhaul**: Replaced 1-second polling interval with `fs.watch` on convDir (directory watcher). Snapshot-based: captures existing files at PTY start, only attaches to files not in snapshot. `attachLatest` for continue/resume. Removed `ignoreJsonlPath` mechanism entirely.

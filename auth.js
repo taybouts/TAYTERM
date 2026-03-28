@@ -476,6 +476,38 @@ async function handleAuthRoute(req, res, pathname) {
 
     const url = new URL(req.url, 'https://localhost');
 
+    // Session verification — used by gateway and other services
+    if (req.method === 'GET' && pathname === '/auth/verify') {
+        const sessionId = getSessionFromCookie(req);
+        if (isValidSession(sessionId)) {
+            const session = activeSessions.get(sessionId);
+            // Find user by session
+            const users = loadUsers();
+            let user = null;
+            if (users.length > 0) {
+                // Match by IP/device or default to first admin
+                const info = parseDeviceInfo(req.headers['user-agent'] || '');
+                user = users.find(u => {
+                    const passkeys = loadPasskeys().passkeys || [];
+                    const pk = passkeys.find(p => p.credentialID === u.credentialID);
+                    return pk && pk.device === info.device;
+                }) || users.find(u => u.role === 'admin') || users[0];
+            }
+            sendJson(res, {
+                valid: true,
+                username: user?.username || 'Unknown',
+                role: user?.role || 'user',
+                email: user?.email || '',
+                access: user?.access || (user?.role === 'admin' ? ['all'] : ['term']),
+            });
+        } else if (isLocalRequest(req)) {
+            sendJson(res, { valid: true, username: 'localhost', role: 'admin', access: ['all'] });
+        } else {
+            sendJson(res, { valid: false });
+        }
+        return true;
+    }
+
     // Login page (desktop) — shows QR code
     if (req.method === 'GET' && pathname === '/login') {
         return await serveLoginPage(req, res);

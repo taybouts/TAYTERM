@@ -10,19 +10,15 @@ if (isIPad) {
     document.body.classList.add('ipad-pwa');
   }
 
-  // ── Connection detection: LAN vs Tailscale vs Cloudflare ──
-  // Use global connection detection from app.js
-  const connLabel = connIsLocal ? 'LAN' : connIsTailscale ? 'TS' : 'CF';
-  const connTitle = connIsLocal ? 'Local (direct)' : connIsTailscale ? 'Tailscale (direct)' : 'Cloudflare (proxied)';
-  const connColor = connIsLocal ? '34,197,94' : connIsTailscale ? '56,189,248' : '245,158,11';
-
-  // Connection indicator badge
+  // ── Connection indicator badge (uses server-side detection from app.js) ──
+  const initColor = _connColors[connInfo.route] || _connColors.unknown;
   const _connIcon = document.createElement('div');
-  _connIcon.title = connTitle;
+  _connIcon.className = 'conn-badge';
+  _connIcon.title = _connTitles[connInfo.route] || '';
   _connIcon.style.cssText = 'position:fixed;top:8px;right:8px;z-index:9999;display:flex;align-items:center;gap:4px;padding:3px 8px;border-radius:12px;font-size:9px;letter-spacing:0.5px;font-family:var(--font-mono);pointer-events:none;' +
-    'background:rgba(' + connColor + ',0.12);border:1px solid rgba(' + connColor + ',0.25);color:rgb(' + connColor + ');';
+    'background:rgba(' + initColor + ',0.12);border:1px solid rgba(' + initColor + ',0.25);color:rgb(' + initColor + ');transition:all 0.3s;';
   _connIcon.innerHTML = '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1" fill="currentColor"/></svg>' +
-    '<span>' + connLabel + '</span>';
+    '<span class="conn-label">' + (_connLabels[connInfo.route] || '?') + '</span>';
   document.body.appendChild(_connIcon);
 
   // Adjust position if in PWA mode (below status bar)

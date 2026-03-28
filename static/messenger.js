@@ -76,11 +76,15 @@ function createMessengerPane(sid, paneIdx, totalPanes) {
   const scrollBtn = document.createElement('button');
   scrollBtn.className = 'chat-scroll-btn';
   scrollBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="6 9 12 15 18 9"/></svg>';
-  scrollBtn.onclick = () => { chatArea.scrollTop = chatArea.scrollHeight; if (sid) scrollLockedToBottom[sid] = true; };
+  scrollBtn.onclick = () => { if (sid) scrollLockedToBottom[sid] = true; chatArea._scrollToBottom(); };
   chatWrap.appendChild(scrollBtn);
+  let _programmaticScroll = false;
+  chatArea._scrollToBottom = () => { _programmaticScroll = true; chatArea.scrollTop = chatArea.scrollHeight; };
   chatArea.addEventListener('scroll', () => {
     const atBottom = chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight < 50;
     scrollBtn.classList.toggle('visible', !atBottom);
+    // Only update lock state on user-initiated scrolls (not programmatic)
+    if (_programmaticScroll) { _programmaticScroll = false; return; }
     if (sid) scrollLockedToBottom[sid] = atBottom;
   });
   pane.appendChild(chatWrap);
@@ -206,8 +210,8 @@ function createMessengerPane(sid, paneIdx, totalPanes) {
     micBtn.onclick = () => _sttToggle(micBtn, textarea);
   }
 
-  // Load conversation history
-  if (sid && sessions[sid] && !sessions[sid].isShell && (!messengerMessages[sid] || messengerMessages[sid].length === 0)) {
+  // Load conversation history (only when server has confirmed JSONL attachment)
+  if (sid && sessions[sid] && !sessions[sid].isShell && sessions[sid]._jsonlSessionId && (!messengerMessages[sid] || messengerMessages[sid].length === 0)) {
     loadConversationHistory(sid, chatArea);
   } else if (sid && messengerMessages[sid] && messengerMessages[sid].length > 0) {
     for (const m of messengerMessages[sid]) {
@@ -217,7 +221,7 @@ function createMessengerPane(sid, paneIdx, totalPanes) {
         chatArea.appendChild(createMsgBubble(m.role, m.text, m.time));
       }
     }
-    setTimeout(() => { chatArea.scrollTop = chatArea.scrollHeight; }, 50);
+    setTimeout(() => { if (chatArea._scrollToBottom) chatArea._scrollToBottom(); else chatArea.scrollTop = chatArea.scrollHeight; }, 50);
   }
   // Default: locked to bottom on first creation
   if (sid && scrollLockedToBottom[sid] === undefined) scrollLockedToBottom[sid] = true;
@@ -400,7 +404,7 @@ async function loadConversationHistory(sessionId, chatArea) {
       }
     }
     chatArea.appendChild(frag);
-    chatArea.scrollTop = chatArea.scrollHeight;
+    if (chatArea._scrollToBottom) chatArea._scrollToBottom(); else chatArea.scrollTop = chatArea.scrollHeight;
   } catch (e) { /* ignore fetch errors */ }
   _vpLoadingHistory = false;
 }
@@ -431,8 +435,11 @@ function renderMarkdown(text) {
   html = html.replace(/((?:^\|.+\|$\n?)+)/gm, (match) => {
     const rows = match.trim().split('\n').filter(r => r.trim());
     if (rows.length < 2) return match;
-    // Skip separator row (|---|---|)
-    const dataRows = rows.filter(r => !/^\|[\s\-:]+\|$/.test(r));
+    // Skip separator rows (|---|---|, | --- | --- |, |:---:|---:|, etc.)
+    const dataRows = rows.filter(r => {
+      const cells = r.split('|').filter(c => c !== '');
+      return !cells.every(c => /^[\s\-:]+$/.test(c));
+    });
     if (dataRows.length === 0) return match;
     let table = '<table>';
     dataRows.forEach((row, i) => {
@@ -487,7 +494,7 @@ function createMsgBubble(role, text, time, extra) {
     copyBtn.onclick = (e) => { e.stopPropagation(); navigator.clipboard.writeText(text).then(() => { copyBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><polyline points="20 6 9 17 4 12"/></svg>'; setTimeout(() => { copyBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>'; }, 1500); }); };
     bubble.appendChild(copyBtn);
   } else {
-    bubble.textContent = text;
+    bubble.innerHTML = renderMarkdown(text);
   }
   msg.appendChild(bubble);
 
@@ -1554,7 +1561,7 @@ function createImageBubble(role, blobUrl, time, sizeInfo, ts) {
     const chatArea = msg.closest('.chat-messages');
     const pane = msg.closest('.messenger-split-pane, .split-messenger');
     const sid = pane?.dataset?.sessionId;
-    if (chatArea && scrollLockedToBottom[sid] !== false) chatArea.scrollTop = chatArea.scrollHeight;
+    if (chatArea && scrollLockedToBottom[sid] !== false) { if (chatArea._scrollToBottom) chatArea._scrollToBottom(); else chatArea.scrollTop = chatArea.scrollHeight; }
   };
   img.onclick = () => {
     const viewer = document.createElement('div');
@@ -1623,7 +1630,7 @@ function addMessengerImage(sessionId, role, blobUrl, filePath, imageSize, mediaT
     if (!chatArea) continue;
     chatArea.appendChild(createImageBubble(role, blobUrl, time, sizeInfo, ts));
     if (scrollLockedToBottom[pane.dataset.sessionId] !== false) {
-      chatArea.scrollTop = chatArea.scrollHeight;
+      if (chatArea._scrollToBottom) chatArea._scrollToBottom(); else chatArea.scrollTop = chatArea.scrollHeight;
     }
   }
 }
@@ -1697,7 +1704,7 @@ function addMessengerMessage(sessionId, role, text, extra) {
     }
     // Only auto-scroll if user is locked to bottom (following chat)
     if (scrollLockedToBottom[paneSid] !== false) {
-      chatArea.scrollTop = chatArea.scrollHeight;
+      if (chatArea._scrollToBottom) chatArea._scrollToBottom(); else chatArea.scrollTop = chatArea.scrollHeight;
     }
   }
   // Auto-play TTS once (outside loop) for new live assistant messages
@@ -1788,7 +1795,7 @@ function _showTypingInArea(sessionId, chatArea, show, tools, agents) {
     if (tokens > 0) html += '<span class="token-count">' + tokens + ' tok</span>';
     html += '</div>';
     existing.innerHTML = html;
-    if (scrollLockedToBottom[sessionId] !== false) chatArea.scrollTop = chatArea.scrollHeight;
+    if (scrollLockedToBottom[sessionId] !== false) { if (chatArea._scrollToBottom) chatArea._scrollToBottom(); else chatArea.scrollTop = chatArea.scrollHeight; }
   } else if (!show && existing) {
     existing.remove();
     delete _typingCache[sessionId];
@@ -1811,7 +1818,7 @@ function showPromptNotification(sessionId) {
       notice.className = 'msg prompt-waiting';
       notice.innerHTML = '<div class="prompt-badge">Waiting for your input</div>';
       chatArea.appendChild(notice);
-      if (scrollLockedToBottom[sessionId] !== false) chatArea.scrollTop = chatArea.scrollHeight;
+      if (scrollLockedToBottom[sessionId] !== false) { if (chatArea._scrollToBottom) chatArea._scrollToBottom(); else chatArea.scrollTop = chatArea.scrollHeight; }
       // Focus the textarea
       const textarea = pane.querySelector('.chat-textarea');
       if (textarea) textarea.focus();

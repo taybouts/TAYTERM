@@ -118,8 +118,8 @@ function renderSplitView() {
     }
   });
 
-  // Load history
-  if (!messengerMessages[sid]) {
+  // Load history (only when server has confirmed JSONL attachment)
+  if (sessions[sid] && sessions[sid]._jsonlSessionId && !messengerMessages[sid]) {
     loadConversationHistory(sid, chatArea);
   } else {
     for (const m of messengerMessages[sid]) {

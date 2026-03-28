@@ -123,14 +123,15 @@ Paste or capture a screenshot — it appears as an inline image bubble. Click to
 
 ## Architecture
 
-### Three-Process Model (v3.0.0)
+### Three-Process Model (v4.0.0)
 
 ```
-pty-daemon.js          PTY Daemon — owns all terminal processes (port 7779)
-                       Dashboard at port 7780
-server.js              T-Term Server — WebSocket bridge, JSONL watcher, TTS/STT proxy (port 7778)
+pty-daemon.js          PTY Daemon — owns all terminal processes (port 5041)
+                       Dashboard at port 5042
+server.js              T-Term Server — WebSocket bridge, JSONL watcher, TTS/STT proxy (port 5044)
 auth.js                Auth system — QR, passkeys, admin, whitelist, audit, email invites
-routes/api.js          REST API + /api/tts/* proxy to NaturalVoice
+lib/gateway-auth.js    Gateway auth — Cloudflare-proxied authentication via taybouts.com
+routes/api.js          REST API + /api/tts/* proxy to T-Voice + /api/project-settings + /api/connection-info
 routes/ws.js           WebSocket handler
 routes/static.js       Static file serving
 lib/jsonl-reader.js    JSONL file watcher (30ms debounced)
@@ -150,32 +151,34 @@ tterm_tray.pyw         System tray launcher
 ### Data Flow
 
 ```
-PTY Daemon (port 7779)
+PTY Daemon (port 5041)
     ├── owns PTY processes (survives server restarts)
     ├── 64KB scrollback buffer per session
     └── TCP protocol (NDJSON: spawn/attach/write/resize/kill)
 
-T-Term Server (port 7778)
+T-Term Server (port 5044, managed by PM2)
     ├── connects to daemon as TCP client
     ├── bridges WebSocket ↔ daemon PTY I/O
     ├── watches JSONL files (fs.watch, 30ms debounce)
-    │       └── WebSocket → all subscribers (desktop, mobile, iPad)
-    ├── /api/tts/* proxy → NaturalVoice :7123
+    │       ├── WebSocket → all subscribers (desktop, mobile, iPad)
+    │       └── jsonl-ready/jsonl-cleared protocol → messenger sync
+    ├── /api/tts/* proxy → T-Voice :5011
     └── recoverDaemonSessions() on startup
 
 Browser ← WebSocket ← PTY raw output (terminal view)
 Browser ← WebSocket ← JSONL parsed (messenger view)
+Browser ← WebSocket ← jsonl-ready (messenger knows which JSONL to load)
 Browser → WebSocket → daemon PTY (user input)
-Browser → /api/tts/synthesize → NaturalVoice → WAV audio
-Browser → /api/tts/transcribe → NaturalVoice → Whisper STT
+Browser → /api/tts/synthesize → T-Voice → WAV audio
+Browser → /api/tts/transcribe → T-Voice → Whisper STT
 ```
 
 ### Routing
 
 ```
 Phone/Browser → Cloudflare (taybouts.com / term.taybouts.com)
-             → Windows 10 server (192.168.1.102)
-             → Tailscale → Dev machine (100.64.0.2:7778)
+             → Gateway (:5000) → T-Term (:5044)
+             → Tailscale → Dev machine (100.64.0.2:5044)
 ```
 
 ### Design System
@@ -247,6 +250,7 @@ Part of the **T-Server** ecosystem. Shares the design language with T-Legal, T-V
 | `.tterm_sessions.json` | Persistent active sessions |
 | `.tterm_audit.json` | Auth event log |
 | `.tterm_invites.json` | Invite tokens (pending/used/revoked/expired) |
+| `.tterm_project_settings.json` | Per-project icon + color settings |
 
 ---
 
@@ -266,9 +270,11 @@ Part of the **T-Server** ecosystem. Shares the design language with T-Legal, T-V
 | `/api/session` | DELETE | Delete a JSONL session file |
 | `/api/session-star` | POST | Favorite/unfavorite sessions |
 | `/api/notes` | GET/POST | Per-project or global notes |
+| `/api/project-settings` | GET/POST | Per-project icon + color customization |
+| `/api/connection-info` | GET | Server-side route detection (CF/LAN/Tailscale) |
 | `/api/mute` | POST | (Legacy) Mute TTS — now browser-side only |
 | `/api/stats` | GET | Token/context stats for a session |
-| `/api/tts/*` | * | Proxy to NaturalVoice :7123 (synthesize, transcribe, etc.) |
+| `/api/tts/*` | * | Proxy to T-Voice :5011 (synthesize, transcribe, etc.) |
 | `/upload` | POST | File/screenshot/photo upload |
 | `/admin` | GET | Admin panel |
 | `/admin/devices` | GET | Registered passkeys + user info |
@@ -312,17 +318,20 @@ openssl req -x509 -newkey rsa:2048 -keyout .tayterm_key.pem -out .tayterm_cert.p
 pythonw tterm_tray.pyw
 
 # Or direct — server auto-starts the PTY daemon
-node server.js
+node server.js --port 5044
 
-# Daemon only (runs independently)
-node pty-daemon.js
+# Via PM2 (recommended — auto-restart on crash)
+pm2 start server.js --name t-term -- --port 5044
+
+# Daemon only (runs independently from T-Admin/T-Daemon/)
+node T-Admin/T-Daemon/pty-daemon.js
 
 # Attach any terminal to a daemon PTY
 node pty-client.js list
-node pty-client.js attach TAYTERM:claude
+node pty-client.js attach T-Term:claude
 ```
 
-Open `https://localhost:7778`
+Open `https://localhost:5044`
 
 ---
 

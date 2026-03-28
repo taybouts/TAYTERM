@@ -278,7 +278,9 @@ body.no-intro .hero-title,
 body.no-intro .hero-sub,
 body.no-intro .fav-hero,
 body.no-intro .status-line,
-body.no-intro .all-projects-btn { animation:none !important; }
+body.no-intro .all-projects-btn,
+body.no-intro .project-card,
+body.no-intro .fav-item { animation:none !important; opacity:1 !important; }
 
 /* ── Favorites Hero Grid — Glass Cards ── */
 .fav-hero {
@@ -313,12 +315,12 @@ body.no-intro .all-projects-btn { animation:none !important; }
   box-shadow:0 8px 28px var(--glow, rgba(56,189,248,0.1));
 }
 .fav-icon {
-  width:48px; height:48px; border-radius:10px;
+  width:60px; height:60px; border-radius:14px;
   display:flex; align-items:center; justify-content:center;
   position:relative;
-  font-family:var(--font-display); font-size:18px; font-weight:700; color:#fff;
+  font-family:var(--font-display); font-size:22px; font-weight:700; color:#fff;
 }
-.fav-icon svg { width:22px; height:22px; color:#fff; }
+.fav-icon svg { width:32px; height:32px; color:#fff; }
 .fav-status {
   position:absolute; bottom:-2px; right:-2px;
   width:8px; height:8px; border-radius:50%;
@@ -479,11 +481,20 @@ body.no-intro .all-projects-btn { animation:none !important; }
   box-shadow:0 0 20px rgba(34,197,94,0.15), 0 8px 24px rgba(0,0,0,0.3);
 }
 .project-icon {
-  width:32px; height:32px; border-radius:10px;
+  width:44px; height:44px; border-radius:12px;
   display:flex; align-items:center; justify-content:center;
   flex-shrink:0; position:relative;
 }
-.project-icon svg { width:18px; height:18px; color:#fff; }
+.project-icon svg { width:26px; height:26px; color:#fff; }
+.card-edit-btn {
+  position:absolute; top:8px; right:8px; z-index:2;
+  width:26px; height:26px; border-radius:8px;
+  display:flex; align-items:center; justify-content:center;
+  color:rgba(255,255,255,0.3); background:rgba(255,255,255,0.04);
+  cursor:pointer; opacity:0; transition:opacity 0.2s, color 0.2s, background 0.2s;
+}
+.project-card:hover .card-edit-btn { opacity:1; }
+.card-edit-btn:hover { color:#fff; background:rgba(255,255,255,0.12); }
 .project-card-header {
   display:flex; align-items:center; gap:10px;
 }
@@ -629,9 +640,11 @@ body.no-intro .all-projects-btn { animation:none !important; }
   border:none; background:none; color:var(--text3);
   cursor:pointer; display:flex; align-items:center;
   justify-content:center; transition:all 0.1s;
-  opacity:0; flex-shrink:0;
+  flex-shrink:0;
 }
-.tab-item:hover .tab-mute,
+.tab-mute { opacity:0; }
+.tab-close { opacity:0.3; }
+.tab-item:hover .tab-mute { opacity:1; }
 .tab-item:hover .tab-close { opacity:1; }
 .tab-mute:hover { color:var(--text2); }
 .tab-mute.muted { opacity:1; color:var(--red); }
@@ -640,11 +653,11 @@ body.no-intro .all-projects-btn { animation:none !important; }
 .tab-mute svg, .tab-close svg { width:12px; height:12px; stroke:currentColor; stroke-width:2; fill:none; }
 
 .tab-item.speaking {
-  animation: tab-speak 1.2s ease-in-out infinite;
+  background: rgba(56,189,248,0.08);
+  box-shadow: inset 0 -2px 0 rgba(56,189,248,0.4);
 }
-@keyframes tab-speak {
-  0%, 100% { background: rgba(56,189,248,0.03); }
-  50% { background: rgba(56,189,248,0.18); box-shadow: 0 0 12px rgba(56,189,248,0.15); }
+.tab-item.speaking:hover {
+  background: var(--glass-hover);
 }
 
 .tab-add {
@@ -1003,8 +1016,8 @@ body.mobile .fav-item {
   padding:30px 8px 22px; border-radius:18px;
   min-height:140px; justify-content:center;
 }
-body.mobile .fav-icon { width:72px; height:72px; border-radius:16px; font-size:28px; }
-body.mobile .fav-icon svg { width:34px; height:34px; }
+body.mobile .fav-icon { width:80px; height:80px; border-radius:18px; font-size:30px; }
+body.mobile .fav-icon svg { width:40px; height:40px; }
 body.mobile .fav-label { font-size:14px; letter-spacing:0.5px; font-weight:600; }
 body.mobile .fav-desc { font-size:10px; }
 body.mobile .fav-status { width:10px; height:10px; }
@@ -1522,6 +1535,14 @@ body.mobile .hero-status {
 }
 .msg-bubble td { color:var(--text); }
 .msg-bubble tr:hover td { background:rgba(255,255,255,0.02); }
+/* Tables in user bubbles — adapt to blue gradient background */
+.msg.user .msg-bubble table { border-color:rgba(255,255,255,0.2); }
+.msg.user .msg-bubble th, .msg.user .msg-bubble td { border-color:rgba(255,255,255,0.2); color:#fff; }
+.msg.user .msg-bubble th { background:rgba(255,255,255,0.12); color:#fff; }
+.msg.user .msg-bubble tr:hover td { background:rgba(255,255,255,0.08); }
+.msg.user .msg-bubble code { background:rgba(255,255,255,0.15); color:#fff; }
+.msg.user .msg-bubble a { color:#fff; text-decoration:underline; }
+.msg.user .msg-bubble strong { color:#fff; }
 .msg-bubble em { font-style:italic; opacity:0.85; }
 .msg-bubble code {
   background:rgba(2,132,199,0.1); padding:1px 5px;

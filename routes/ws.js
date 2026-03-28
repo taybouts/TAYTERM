@@ -75,6 +75,12 @@ module.exports = function createWsHandler(deps) {
         // Subscribe
         entry.subscribers.add(ws);
 
+        // If JSONL already attached, tell this client immediately
+        if (entry.jsonlPath) {
+            const sid = path.basename(entry.jsonlPath, '.jsonl');
+            ws.send(JSON.stringify({ type: 'jsonl-ready', sessionId: sid }));
+        }
+
         ws.on('message', (raw) => {
             try {
                 const payload = JSON.parse(raw.toString());

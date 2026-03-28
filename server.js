@@ -11,7 +11,7 @@ const os = require('os');
 const { execSync } = require('child_process');
 const WebSocket = require('ws');
 // HeadlessTerminal removed — TTS + messenger now use JSONL (structured, clean data)
-const { isAuthenticated, handleAuthRoute, checkWebSocketAuth, getRequestIdentity, logAudit } = require('./auth');
+const { isAuthenticated, handleAuthRoute, checkWebSocketAuth, getRequestIdentity, logAudit } = require('./lib/gateway-auth');
 const { TTSTap, claimProject, releaseProject } = require('./lib/tts-tap');
 const initDaemonClient = require('./lib/daemon-client');
 const createReader = require('./lib/jsonl-reader');

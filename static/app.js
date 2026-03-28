@@ -15,6 +15,27 @@ const connIsLocal = _host === '127.0.0.1' || _host === 'localhost' || _host === 
 const connIsTailscale = !connIsLocal && (_host.startsWith('100.64.') || _host.startsWith('100.100.') || _host.includes('tse.mesh'));
 const connIsCloudflare = !connIsLocal && !connIsTailscale;
 const connMode = connIsLocal ? 'local' : connIsTailscale ? 'tailscale' : 'cloudflare';
+// Server-side connection info (async — updates connInfo when ready)
+let connInfo = { route: connMode, cloudflare: connIsCloudflare, clientIp: '', localNetwork: connIsLocal };
+const _connLabels = { 'local': 'LAN', 'tailscale': 'TS', 'cf-lan': 'CF\u2009\u279C\u2009LAN', 'cf-remote': 'CF', 'unknown': '?' };
+const _connColors = { 'local': '34,197,94', 'tailscale': '56,189,248', 'cf-lan': '34,197,94', 'cf-remote': '245,158,11', 'unknown': '148,163,184' };
+const _connTitles = { 'local': 'Local network (direct)', 'tailscale': 'Tailscale VPN (direct)', 'cf-lan': 'Cloudflare \u279C Local network', 'cf-remote': 'Cloudflare (remote)', 'unknown': 'Unknown' };
+(async function fetchConnInfo() {
+  try {
+    const r = await fetch('/api/connection-info');
+    connInfo = await r.json();
+    // Update any connection badges on the page
+    document.querySelectorAll('.conn-badge').forEach(el => {
+      const route = connInfo.route;
+      const c = _connColors[route] || _connColors.unknown;
+      el.style.background = 'rgba(' + c + ',0.12)';
+      el.style.borderColor = 'rgba(' + c + ',0.25)';
+      el.style.color = 'rgb(' + c + ')';
+      el.querySelector('.conn-label').textContent = _connLabels[route] || '?';
+      el.title = (_connTitles[route] || '') + (connInfo.clientIp ? ' \u2014 ' + connInfo.clientIp : '');
+    });
+  } catch(e) {}
+})();
 
 // TTS: always proxy through server to avoid mixed-content and CORS issues
 const TTS_BASE = window.location.origin + '/api/tts';
@@ -79,15 +100,21 @@ function savePinnedProjects(list) {
     body: JSON.stringify(list)
   }).catch(() => {});
 }
+function rerenderDashboard() {
+  const pinned = getPinnedProjects();
+  renderFavorites(allProjects, pinned);
+  renderHeroStatus(allProjects, pinned);
+  renderDashboard(allProjects, pinned);
+}
 function pinProject(name) {
   const pinned = getPinnedProjects();
   if (!pinned.includes(name)) pinned.push(name);
   savePinnedProjects(pinned);
-  loadProjects();
+  rerenderDashboard();
 }
 function unpinProject(name) {
   savePinnedProjects(getPinnedProjects().filter(n => n !== name));
-  loadProjects();
+  rerenderDashboard();
 }
 function movePinned(name, dir) {
   const pinned = getPinnedProjects();
@@ -97,36 +124,147 @@ function movePinned(name, dir) {
   if (j < 0 || j >= pinned.length) return;
   [pinned[i], pinned[j]] = [pinned[j], pinned[i]];
   savePinnedProjects(pinned);
-  loadProjects();
+  rerenderDashboard();
 }
 
 const terminalIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>';
 
-// App color map from T-Server design system
-const appColorMap = {
-  'TAYTERM': '#0284c7', 'NaturalVoice': '#7c3aed', 'LEGAL': '#dc2626',
+// ══════════════════════════════════════════
+//  Icon Library + Project Appearance
+// ══════════════════════════════════════════
+
+// Full icon library — name → SVG inner content (24x24 viewBox, stroke-based)
+const iconLibrary = {
+  // App Icons — Line (24x24) — T-Server design system originals
+  'terminal':     '<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>',
+  'waveform-app': '<line x1="4" y1="9" x2="4" y2="15"/><line x1="7" y1="6" x2="7" y2="18"/><line x1="10" y1="8" x2="10" y2="16"/><line x1="13" y1="4" x2="13" y2="20"/><line x1="16" y1="7" x2="16" y2="17"/><line x1="19" y1="9" x2="19" y2="15"/>',
+  'scale-app':    '<line x1="12" y1="3" x2="12" y2="19"/><line x1="5" y1="6" x2="19" y2="6"/><path d="M5 6 L3 12 Q3 14 5 14 Q7 14 7 12 Z" fill="currentColor" opacity="0.15"/><path d="M19 6 L17 12 Q17 14 19 14 Q21 14 21 12 Z" fill="currentColor" opacity="0.15"/><line x1="8" y1="19" x2="16" y2="19"/>',
+  'gear-app':     '<circle cx="12" cy="12" r="3"/><path d="M12 2 L12 5"/><path d="M12 19 L12 22"/><path d="M2 12 L5 12"/><path d="M19 12 L22 12"/><path d="M4.93 4.93 L6.34 6.34"/><path d="M17.66 17.66 L19.07 19.07"/><path d="M4.93 19.07 L6.34 17.66"/><path d="M17.66 6.34 L19.07 4.93"/>',
+  'network-app':  '<circle cx="6" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="18" r="2"/><circle cx="12" cy="12" r="2"/><line x1="7.8" y1="7.2" x2="10.5" y2="10.5"/><line x1="16.2" y1="7.2" x2="13.5" y2="10.5"/><line x1="7.8" y1="16.8" x2="10.5" y2="13.5"/><line x1="16.2" y1="16.8" x2="13.5" y2="13.5"/>',
+  'chart-app':    '<line x1="6" y1="4" x2="6" y2="20"/><rect x="4" y="8" width="4" height="5" rx="0.5" fill="currentColor" opacity="0.3"/><line x1="12" y1="6" x2="12" y2="18"/><rect x="10" y="9" width="4" height="6" rx="0.5" fill="currentColor" opacity="0.3"/><line x1="18" y1="3" x2="18" y2="17"/><rect x="16" y="5" width="4" height="7" rx="0.5" fill="currentColor" opacity="0.3"/>',
+  'grid-app':     '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="4" rx="1.5"/><rect x="14" y="11" width="7" height="10" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/>',
+  // Development
+  'code':       '<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>',
+  'braces':       '<path d="M8 3 C5 3 4 5 4 7 L4 10 C4 11 3 12 2 12 C3 12 4 13 4 14 L4 17 C4 19 5 21 8 21"/><path d="M16 3 C19 3 20 5 20 7 L20 10 C20 11 21 12 22 12 C21 12 20 13 20 14 L20 17 C20 19 19 21 16 21"/>',
+  'git':          '<circle cx="12" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="18" r="2"/><line x1="12" y1="8" x2="12" y2="12"/><path d="M12 12 C12 16 6 16 6 16"/><path d="M12 12 C12 16 18 16 18 16"/>',
+  'bug':          '<rect x="8" y="6" width="8" height="14" rx="4"/><line x1="5" y1="10" x2="8" y2="10"/><line x1="16" y1="10" x2="19" y2="10"/><line x1="5" y1="14" x2="8" y2="14"/><line x1="16" y1="14" x2="19" y2="14"/><path d="M9 2 L10 6"/><path d="M15 2 L14 6"/>',
+  'database':     '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5 L4 19 C4 20.7 7.6 22 12 22 C16.4 22 20 20.7 20 19 L20 5"/><path d="M4 12 C4 13.7 7.6 15 12 15 C16.4 15 20 13.7 20 12"/>',
+  'cpu':          '<rect x="6" y="6" width="12" height="12" rx="2"/><line x1="9" y1="2" x2="9" y2="6"/><line x1="15" y1="2" x2="15" y2="6"/><line x1="9" y1="18" x2="9" y2="22"/><line x1="15" y1="18" x2="15" y2="22"/><line x1="2" y1="9" x2="6" y2="9"/><line x1="2" y1="15" x2="6" y2="15"/><line x1="18" y1="9" x2="22" y2="9"/><line x1="18" y1="15" x2="22" y2="15"/>',
+  'api':          '<path d="M4 15 L8 4 L12 15"/><line x1="5.5" y1="11" x2="10.5" y2="11"/><path d="M14 4 L14 15"/><circle cx="14" cy="4" r="1.5" fill="currentColor" opacity="0.3"/><path d="M18 4 L18 15"/><line x1="18" y1="4" x2="22" y2="4"/><line x1="18" y1="9" x2="21" y2="9"/>',
+  // Communication
+  'chat':         '<path d="M21 12 C21 16.4 16.97 20 12 20 C10.5 20 9.1 19.7 7.8 19.2 L3 21 L4.5 17.2 C3.6 15.7 3 13.9 3 12 C3 7.6 7.03 4 12 4 C16.97 4 21 7.6 21 12Z"/>',
+  'mail':         '<rect x="3" y="5" width="18" height="14" rx="2"/><polyline points="3 7 12 13 21 7"/>',
+  'phone':        '<path d="M22 16.9v3a2 2 0 01-2.2 2 19.8 19.8 0 01-8.6-3.1 19.4 19.4 0 01-6-6 19.8 19.8 0 01-3.1-8.7A2 2 0 014.1 2h3a2 2 0 012 1.7 12.4 12.4 0 00.7 2.7 2 2 0 01-.5 2.1L8.1 9.7a16 16 0 006.2 6.2l1.2-1.2a2 2 0 012.1-.5 12.4 12.4 0 002.7.7A2 2 0 0122 16.9z"/>',
+  'send':         '<line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9"/>',
+  'bot':          '<rect x="5" y="8" width="14" height="12" rx="3"/><circle cx="9" cy="14" r="1.5" fill="currentColor" opacity="0.4"/><circle cx="15" cy="14" r="1.5" fill="currentColor" opacity="0.4"/><line x1="12" y1="3" x2="12" y2="8"/><circle cx="12" cy="3" r="1.5"/>',
+  // Audio & Media
+  'waveform':     '<line x1="4" y1="9" x2="4" y2="15"/><line x1="7" y1="6" x2="7" y2="18"/><line x1="10" y1="8" x2="10" y2="16"/><line x1="13" y1="4" x2="13" y2="20"/><line x1="16" y1="7" x2="16" y2="17"/><line x1="19" y1="9" x2="19" y2="15"/>',
+  'mic':          '<path d="M12 2 C10.3 2 9 3.3 9 5 L9 12 C9 13.7 10.3 15 12 15 C13.7 15 15 13.7 15 12 L15 5 C15 3.3 13.7 2 12 2Z"/><path d="M19 10 L19 12 C19 15.9 15.9 19 12 19 C8.1 19 5 15.9 5 12 L5 10"/><line x1="12" y1="19" x2="12" y2="22"/>',
+  'speaker':      '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19"/><path d="M15.5 8.5 C16.9 9.9 16.9 14.1 15.5 15.5"/><path d="M19 5 C22 8 22 16 19 19"/>',
+  'music':        '<path d="M9 18 L9 5 L21 3 L21 16"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>',
+  'headphones':   '<path d="M3 18 L3 12 C3 7 7 3 12 3 C17 3 21 7 21 12 L21 18"/><rect x="1" y="14" width="4" height="7" rx="1.5"/><rect x="19" y="14" width="4" height="7" rx="1.5"/>',
+  'camera':       '<path d="M23 19 C23 20.1 22.1 21 21 21 L3 21 C1.9 21 1 20.1 1 19 L1 8 C1 6.9 1.9 6 3 6 L7 6 L9 3 L15 3 L17 6 L21 6 C22.1 6 23 6.9 23 8Z"/><circle cx="12" cy="13" r="4"/>',
+  'image':        '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/>',
+  'video':        '<polygon points="23 7 16 12 23 17"/><rect x="1" y="5" width="15" height="14" rx="2"/>',
+  // Objects & Concepts
+  'folder':       '<path d="M22 19 C22 20.1 21.1 21 20 21 L4 21 C2.9 21 2 20.1 2 19 L2 5 C2 3.9 2.9 3 4 3 L9 3 L11 6 L20 6 C21.1 6 22 6.9 22 8Z"/>',
+  'file':         '<path d="M14 2 L6 2 C4.9 2 4 2.9 4 4 L4 20 C4 21.1 4.9 22 6 22 L18 22 C19.1 22 20 21.1 20 20 L20 8Z"/><polyline points="14 2 14 8 20 8"/>',
+  'book':         '<path d="M4 19.5 C4 18.1 5.1 17 6.5 17 L20 17 L20 2 L6.5 2 C5.1 2 4 3.1 4 4.5Z"/><path d="M4 19.5 C4 20.9 5.1 22 6.5 22 L20 22 L20 17"/>',
+  'clipboard':    '<path d="M16 4 L18 4 C19.1 4 20 4.9 20 6 L20 20 C20 21.1 19.1 22 18 22 L6 22 C4.9 22 4 21.1 4 20 L4 6 C4 4.9 4.9 4 6 4 L8 4"/><rect x="8" y="2" width="8" height="4" rx="1"/>',
+  'key':          '<path d="M21 2 L19 4 L21 2Z M15 8 L19 4 M15 8 L17 10 L15 12 M7 14 C4.8 14 3 15.8 3 18 C3 20.2 4.8 22 7 22 C9.2 22 11 20.2 11 18 C11 15.8 9.2 14 7 14Z"/>',
+  // Business & Finance
+  'scale':        '<line x1="12" y1="3" x2="12" y2="19"/><line x1="5" y1="6" x2="19" y2="6"/><path d="M5 6 L3 12 Q3 14 5 14 Q7 14 7 12 Z" fill="currentColor" opacity="0.15"/><path d="M19 6 L17 12 Q17 14 19 14 Q21 14 21 12 Z" fill="currentColor" opacity="0.15"/><line x1="8" y1="19" x2="16" y2="19"/>',
+  'chart':        '<line x1="6" y1="4" x2="6" y2="20"/><rect x="4" y="8" width="4" height="5" rx="0.5" fill="currentColor" opacity="0.3"/><line x1="12" y1="6" x2="12" y2="18"/><rect x="10" y="9" width="4" height="6" rx="0.5" fill="currentColor" opacity="0.3"/><line x1="18" y1="3" x2="18" y2="17"/><rect x="16" y="5" width="4" height="7" rx="0.5" fill="currentColor" opacity="0.3"/>',
+  'dollar':       '<line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5 L9.5 5 C7.5 5 6 6.5 6 8.5 C6 10.5 7.5 12 9.5 12 L14.5 12 C16.5 12 18 13.5 18 15.5 C18 17.5 16.5 19 14.5 19 L7 19"/>',
+  'briefcase':    '<rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7 L16 5 C16 3.9 15.1 3 14 3 L10 3 C8.9 3 8 3.9 8 5 L8 7"/>',
+  // Infrastructure & Network
+  'cloud':        '<path d="M18 10 C18.7 10 20 10.5 20 13 C20 15.5 18 16 17 16 L7 16 C4.8 16 3 14.2 3 12 C3 9.8 4.8 8 7 8 C7 5 9.2 3 12 3 C14.5 3 16.5 4.8 17 7"/>',
+  'globe':        '<circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2 C14.7 4.7 16 8.2 16 12 C16 15.8 14.7 19.3 12 22"/><path d="M12 2 C9.3 4.7 8 8.2 8 12 C8 15.8 9.3 19.3 12 22"/>',
+  'server':       '<rect x="3" y="2" width="18" height="6" rx="2"/><rect x="3" y="10" width="18" height="6" rx="2"/><circle cx="7" cy="5" r="1" fill="currentColor"/><circle cx="7" cy="13" r="1" fill="currentColor"/><line x1="3" y1="20" x2="8" y2="20"/><line x1="16" y1="20" x2="21" y2="20"/><line x1="12" y1="16" x2="12" y2="22"/>',
+  'network':      '<circle cx="6" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="18" r="2"/><circle cx="12" cy="12" r="2"/><line x1="7.8" y1="7.2" x2="10.5" y2="10.5"/><line x1="16.2" y1="7.2" x2="13.5" y2="10.5"/><line x1="7.8" y1="16.8" x2="10.5" y2="13.5"/><line x1="16.2" y1="16.8" x2="13.5" y2="13.5"/>',
+  'wifi':         '<path d="M5 12.5 C8.5 9 15.5 9 19 12.5"/><path d="M2 9 C7 4 17 4 22 9"/><path d="M8.5 16 C10 14.5 14 14.5 15.5 16"/><circle cx="12" cy="19" r="1" fill="currentColor"/>',
+  'shield':       '<path d="M12 22 C12 22 3 18 3 10 L3 5 L12 2 L21 5 L21 10 C21 18 12 22 12 22Z"/>',
+  'lock':         '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11 L8 7 C8 4.8 9.8 3 12 3 C14.2 3 16 4.8 16 7 L16 11"/>',
+  // Shapes & UI
+  'grid':         '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="4" rx="1.5"/><rect x="14" y="11" width="7" height="10" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/>',
+  'layers':       '<polygon points="12 2 2 7 12 12 22 7"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>',
+  'box':          '<path d="M21 16 L21 8 C21 7.5 20.7 7 20.2 6.7 L12.2 2.2 C12.1 2.1 11.9 2.1 11.8 2.2 L3.8 6.7 C3.3 7 3 7.5 3 8 L3 16 C3 16.5 3.3 17 3.8 17.3 L11.8 21.8 C11.9 21.9 12.1 21.9 12.2 21.8 L20.2 17.3 C20.7 17 21 16.5 21 16Z"/><line x1="3.3" y1="7" x2="12" y2="12"/><line x1="12" y1="22" x2="12" y2="12"/><line x1="20.7" y1="7" x2="12" y2="12"/>',
+  // Science & Tools
+  'gear':         '<circle cx="12" cy="12" r="3"/><path d="M12 2 L12 5"/><path d="M12 19 L12 22"/><path d="M2 12 L5 12"/><path d="M19 12 L22 12"/><path d="M4.93 4.93 L6.34 6.34"/><path d="M17.66 17.66 L19.07 19.07"/><path d="M4.93 19.07 L6.34 17.66"/><path d="M17.66 6.34 L19.07 4.93"/>',
+  'wrench':       '<path d="M14.7 6.3 C13.5 5.1 11.7 4.7 10.1 5.3 L12.4 7.6 L11.7 10.3 L9 11 L6.7 8.7 C6.1 10.3 6.5 12.1 7.7 13.3 C8.9 14.5 10.7 14.9 12.3 14.3 L18.3 20.3 C18.7 20.7 19.3 20.7 19.7 20.3 L20.3 19.7 C20.7 19.3 20.7 18.7 20.3 18.3 L14.3 12.3 C14.9 10.7 14.5 8.9 14.7 6.3Z"/>',
+  'flask':        '<path d="M9 3 L15 3"/><path d="M10 3 L10 9 L4 19 C3.3 20.3 4.2 22 5.7 22 L18.3 22 C19.8 22 20.7 20.3 20 19 L14 9 L14 3"/>',
+  'atom':         '<circle cx="12" cy="12" r="2" fill="currentColor" opacity="0.4"/><ellipse cx="12" cy="12" rx="10" ry="4"/><ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(60 12 12)"/><ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(120 12 12)"/>',
+  'lightning':    '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10"/>',
+  'fire':         '<path d="M12 22 C16.4 22 20 18.4 20 14 C20 8 12 2 12 2 C12 2 4 8 4 14 C4 18.4 7.6 22 12 22Z"/><path d="M12 22 C14.2 22 16 20.2 16 18 C16 15 12 11 12 11 C12 11 8 15 8 18 C8 20.2 9.8 22 12 22Z" fill="currentColor" opacity="0.15"/>',
+  // Navigation & Arrows
+  'compass':      '<circle cx="12" cy="12" r="10"/><polygon points="16.2 7.8 14.5 14.5 7.8 16.2 9.5 9.5" fill="currentColor" opacity="0.2"/><polygon points="16.2 7.8 14.5 14.5 7.8 16.2 9.5 9.5"/>',
+  'rocket':       '<path d="M4.5 16.5 C3 18 3 21 3 21 C3 21 6 21 7.5 19.5 C8.3 18.7 8.3 17.3 7.5 16.5 C6.7 15.7 5.3 15.7 4.5 16.5Z"/><path d="M12 15 L9 12 C9 12 11 6 17 3 C17 3 14 9 12 15Z"/><path d="M12 15 L15 18 C15 18 18 12 21 6"/>',
+  'target':       '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>',
+  // People & Social
+  'user':         '<path d="M20 21 L20 19 C20 16.8 18.2 15 16 15 L8 15 C5.8 15 4 16.8 4 19 L4 21"/><circle cx="12" cy="7" r="4"/>',
+  'users':        '<path d="M17 21 L17 19 C17 16.8 15.2 15 13 15 L5 15 C2.8 15 1 16.8 1 19 L1 21"/><circle cx="9" cy="7" r="4"/><path d="M23 21 L23 19 C23 17.1 21.8 15.5 20 15.1"/><path d="M16 3.1 C17.8 3.6 19 5.1 19 7 C19 8.9 17.8 10.4 16 10.9"/>',
+  'heart':        '<path d="M20.8 4.6 C18.5 2.3 14.8 2.3 12.5 4.6 L12 5.1 L11.5 4.6 C9.2 2.3 5.5 2.3 3.2 4.6 C0.9 6.9 0.9 10.6 3.2 12.9 L12 21.7 L20.8 12.9 C23.1 10.6 23.1 6.9 20.8 4.6Z"/>',
+  'star':         '<polygon points="12 2 15.1 8.3 22 9.3 17 14.1 18.2 21 12 17.8 5.8 21 7 14.1 2 9.3 8.9 8.3"/>',
+  // Misc
+  'home':         '<path d="M3 9 L12 2 L21 9 L21 20 C21 21.1 20.1 22 19 22 L5 22 C3.9 22 3 21.1 3 20Z"/><polyline points="9 22 9 12 15 12 15 22"/>',
+  'clock':        '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+  'eye':          '<path d="M1 12 C1 12 5 5 12 5 C19 5 23 12 23 12 C23 12 19 19 12 19 C5 19 1 12 1 12Z"/><circle cx="12" cy="12" r="3"/>',
+  'search':       '<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.7" y2="16.7"/>',
+  'download':     '<path d="M21 15 L21 19 C21 20.1 20.1 21 19 21 L5 21 C3.9 21 3 20.1 3 19 L3 15"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
+  'upload':       '<path d="M21 15 L21 19 C21 20.1 20.1 21 19 21 L5 21 C3.9 21 3 20.1 3 19 L3 15"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>',
+  'link':         '<path d="M10 13 C10.9 14.3 12.6 15 14 15 C16.2 15 18 13.2 18 11 L21 8 C21 5.8 19.2 4 17 4 C14.8 4 13 5.8 13 8"/><path d="M14 11 C13.1 9.7 11.4 9 10 9 C7.8 9 6 10.8 6 13 L3 16 C3 18.2 4.8 20 7 20 C9.2 20 11 18.2 11 16"/>',
+  'pin':          '<path d="M21 10 C21 17 12 23 12 23 C12 23 3 17 3 10 C3 5 7 1 12 1 C17 1 21 5 21 10Z"/><circle cx="12" cy="10" r="3"/>',
+  'flag':         '<line x1="4" y1="22" x2="4" y2="2"/><path d="M4 2 L4 15 C4 15 7 12 12 15 C17 18 20 15 20 15 L20 2 C20 2 17 5 12 2 C7 -1 4 2 4 2Z" fill="currentColor" opacity="0.1"/>',
+  'zap':          '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10"/>',
+  'bulb':         '<path d="M9 18 L15 18"/><path d="M10 22 L14 22"/><path d="M12 2 C8 2 5 5 5 9 C5 12 7 14 8.5 15.5 C9 16 9 16.5 9 17 L15 17 C15 16.5 15 16 15.5 15.5 C17 14 19 12 19 9 C19 5 16 2 12 2Z"/>',
+  'telescope':    '<circle cx="6" cy="18" r="3"/><line x1="8.5" y1="16" x2="18" y2="4"/><line x1="15" y1="3" x2="21" y2="7"/><line x1="9" y1="15.5" x2="13" y2="10"/>',
+};
+
+// Default hardcoded map (fallback when no saved settings exist)
+const _defaultColorMap = {
+  'T-Term': '#0284c7', 'T-Voice': '#7c3aed', 'LEGAL': '#dc2626',
   'TayProcess': '#4f46e5', 'MESHVPN': '#059669', 'NinjaTrader': '#d97706',
   'TELEGRAMBOT': '#d97706', 'Command Center': '#0891b2', 'IMAGEW': '#ea580c',
 };
-// SVG icons from T-Server design system (line icons, inherit color via currentColor)
-const appIconSvg = {
-  'TAYTERM': '<polyline points="7 10 10 13 7 16"/><line x1="13" y1="16" x2="17" y2="16"/>',
-  'NaturalVoice': '<line x1="4" y1="9" x2="4" y2="15"/><line x1="7" y1="6" x2="7" y2="18"/><line x1="10" y1="8" x2="10" y2="16"/><line x1="13" y1="4" x2="13" y2="20"/><line x1="16" y1="7" x2="16" y2="17"/><line x1="19" y1="9" x2="19" y2="15"/>',
-  'LEGAL': '<line x1="12" y1="3" x2="12" y2="19"/><line x1="5" y1="6" x2="19" y2="6"/><path d="M5 6 L3 12 Q3 14 5 14 Q7 14 7 12 Z" fill="currentColor" opacity="0.15"/><path d="M19 6 L17 12 Q17 14 19 14 Q21 14 21 12 Z" fill="currentColor" opacity="0.15"/><line x1="8" y1="19" x2="16" y2="19"/>',
-  'TayProcess': '<circle cx="12" cy="12" r="3"/><path d="M12 2 L12 5"/><path d="M12 19 L12 22"/><path d="M2 12 L5 12"/><path d="M19 12 L22 12"/><path d="M4.93 4.93 L6.34 6.34"/><path d="M17.66 17.66 L19.07 19.07"/><path d="M4.93 19.07 L6.34 17.66"/><path d="M17.66 6.34 L19.07 4.93"/>',
-  'MESHVPN': '<circle cx="6" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="18" r="2"/><circle cx="12" cy="12" r="2"/><line x1="7.8" y1="7.2" x2="10.5" y2="10.5"/><line x1="16.2" y1="7.2" x2="13.5" y2="10.5"/><line x1="7.8" y1="16.8" x2="10.5" y2="13.5"/><line x1="16.2" y1="16.8" x2="13.5" y2="13.5"/>',
-  'NinjaTrader': '<line x1="6" y1="4" x2="6" y2="20"/><rect x="4" y="8" width="4" height="5" rx="0.5" fill="currentColor" opacity="0.3"/><line x1="12" y1="6" x2="12" y2="18"/><rect x="10" y="9" width="4" height="6" rx="0.5" fill="currentColor" opacity="0.3"/><line x1="18" y1="3" x2="18" y2="17"/><rect x="16" y="5" width="4" height="7" rx="0.5" fill="currentColor" opacity="0.3"/>',
-  'Command Center': '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="4" rx="1.5"/><rect x="14" y="11" width="7" height="10" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/>',
+const _defaultIconMap = {
+  'T-Term': 'terminal', 'T-Voice': 'waveform-app', 'LEGAL': 'scale-app',
+  'TayProcess': 'gear-app', 'MESHVPN': 'network-app', 'NinjaTrader': 'chart-app',
+  'Command Center': 'grid-app',
 };
-function getProjectIcon(name) {
-  const svg = appIconSvg[name];
-  if (!svg) return '';
-  return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' + svg + '</svg>';
+
+// Saved project settings (loaded from server)
+let _projectSettings = {};
+(async function loadProjectSettings() {
+  try {
+    const r = await fetch('/api/project-settings');
+    _projectSettings = await r.json();
+  } catch(e) {}
+})();
+
+function _iconSvgFromKey(key) {
+  const inner = iconLibrary[key];
+  if (!inner) return '';
+  return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + inner + '</svg>';
 }
+
+function getProjectIcon(name) {
+  // Saved setting takes priority
+  const saved = _projectSettings[name];
+  if (saved && saved.icon) return _iconSvgFromKey(saved.icon);
+  // Hardcoded default
+  if (_defaultIconMap[name]) return _iconSvgFromKey(_defaultIconMap[name]);
+  return '';
+}
+
 const projectColors = {};
 const defaultColors = ['#0284c7','#d97706','#dc2626','#818cf8','#14b8a6','#7c3aed','#f97316','#22c55e'];
 function getProjectColor(name) {
-  if (appColorMap[name]) return appColorMap[name];
+  // Saved setting takes priority
+  const saved = _projectSettings[name];
+  if (saved && saved.color) return saved.color;
+  // Hardcoded default
+  if (_defaultColorMap[name]) return _defaultColorMap[name];
+  // Hash-based fallback
   if (!projectColors[name]) {
     let hash = 0;
     for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
@@ -138,6 +276,171 @@ function adjustColor(hex, amount) {
   let r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
   r = Math.min(255, r + amount); g = Math.min(255, g + amount); b = Math.min(255, b + amount);
   return '#' + [r,g,b].map(c => c.toString(16).padStart(2,'0')).join('');
+}
+
+// ══════════════════════════════════════════
+//  Project Appearance Picker Modal
+// ══════════════════════════════════════════
+const paletteColors = [
+  '#0284c7','#0891b2','#14b8a6','#059669','#22c55e','#84cc16',
+  '#d97706','#ea580c','#f97316','#dc2626','#e11d48','#f43f5e',
+  '#7c3aed','#8b5cf6','#818cf8','#4f46e5','#6366f1','#a855f7',
+  '#ec4899','#d946ef','#06b6d4','#0ea5e9','#64748b','#78716c',
+];
+
+function showAppearancePicker(projectName) {
+  const currentColor = getProjectColor(projectName);
+  const saved = _projectSettings[projectName] || {};
+  const currentIcon = saved.icon || _defaultIconMap[projectName] || '';
+
+  const overlay = document.createElement('div');
+  overlay.className = 'tterm-modal-overlay';
+  const modal = document.createElement('div');
+  modal.className = 'tterm-modal';
+  modal.style.maxWidth = '480px';
+  modal.style.maxHeight = '80vh';
+  modal.style.overflow = 'auto';
+
+  // Title
+  const title = document.createElement('div');
+  title.className = 'tterm-modal-title';
+  title.textContent = projectName;
+  modal.appendChild(title);
+
+  // Preview
+  const preview = document.createElement('div');
+  preview.style.cssText = 'display:flex;align-items:center;gap:12px;margin:12px 0 16px;justify-content:center;';
+  const previewIcon = document.createElement('div');
+  previewIcon.className = 'project-icon';
+  previewIcon.style.cssText = 'width:72px;height:72px;border-radius:16px;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,' + currentColor + ',' + adjustColor(currentColor, 40) + ');';
+  previewIcon.innerHTML = (currentIcon ? _iconSvgFromKey(currentIcon) : getProjectIcon(projectName)) || terminalIcon;
+  preview.appendChild(previewIcon);
+  const previewLabel = document.createElement('div');
+  previewLabel.style.cssText = 'font-size:18px;font-weight:600;color:#e2e8f0;';
+  previewLabel.textContent = projectName;
+  preview.appendChild(previewLabel);
+  modal.appendChild(preview);
+
+  let selectedIcon = currentIcon;
+  let selectedColor = currentColor;
+
+  function updatePreview() {
+    previewIcon.style.background = 'linear-gradient(135deg,' + selectedColor + ',' + adjustColor(selectedColor, 40) + ')';
+    previewIcon.innerHTML = (selectedIcon ? _iconSvgFromKey(selectedIcon) : '') || terminalIcon;
+  }
+
+  // Color section
+  const colorLabel = document.createElement('div');
+  colorLabel.style.cssText = 'font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#94a3b8;margin-bottom:8px;font-weight:600;';
+  colorLabel.textContent = 'Color';
+  modal.appendChild(colorLabel);
+
+  const colorGrid = document.createElement('div');
+  colorGrid.style.cssText = 'display:grid;grid-template-columns:repeat(8,1fr);gap:6px;margin-bottom:16px;';
+  for (const c of paletteColors) {
+    const swatch = document.createElement('div');
+    swatch.style.cssText = 'width:100%;aspect-ratio:1;border-radius:8px;cursor:pointer;background:' + c + ';border:2px solid ' + (c === selectedColor ? '#fff' : 'transparent') + ';transition:border 0.15s,transform 0.15s;';
+    swatch.onmouseenter = () => { swatch.style.transform = 'scale(1.15)'; };
+    swatch.onmouseleave = () => { swatch.style.transform = ''; };
+    swatch.onclick = () => {
+      selectedColor = c;
+      colorGrid.querySelectorAll('div').forEach(d => d.style.borderColor = 'transparent');
+      swatch.style.borderColor = '#fff';
+      customColorInput.value = c;
+      updatePreview();
+    };
+    colorGrid.appendChild(swatch);
+  }
+  modal.appendChild(colorGrid);
+
+  // Custom color input
+  const customRow = document.createElement('div');
+  customRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:20px;';
+  const customColorInput = document.createElement('input');
+  customColorInput.type = 'color';
+  customColorInput.value = selectedColor;
+  customColorInput.style.cssText = 'width:36px;height:36px;border:none;background:none;cursor:pointer;padding:0;';
+  customColorInput.oninput = () => {
+    selectedColor = customColorInput.value;
+    colorGrid.querySelectorAll('div').forEach(d => d.style.borderColor = 'transparent');
+    updatePreview();
+  };
+  const customLabel = document.createElement('span');
+  customLabel.style.cssText = 'color:#94a3b8;font-size:12px;';
+  customLabel.textContent = 'Custom color';
+  customRow.appendChild(customColorInput);
+  customRow.appendChild(customLabel);
+  modal.appendChild(customRow);
+
+  // Icon section
+  const iconLabel = document.createElement('div');
+  iconLabel.style.cssText = 'font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#94a3b8;margin-bottom:8px;font-weight:600;';
+  iconLabel.textContent = 'Icon';
+  modal.appendChild(iconLabel);
+
+  const iconGrid = document.createElement('div');
+  iconGrid.style.cssText = 'display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin-bottom:20px;';
+  // "None" option
+  const noneCell = document.createElement('div');
+  noneCell.style.cssText = 'width:100%;aspect-ratio:1;border-radius:8px;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:10px;color:#64748b;border:2px solid ' + (!selectedIcon ? '#fff' : 'transparent') + ';background:rgba(255,255,255,0.05);transition:border 0.15s,background 0.15s;';
+  noneCell.textContent = 'none';
+  noneCell.onclick = () => {
+    selectedIcon = '';
+    iconGrid.querySelectorAll('.icon-cell').forEach(d => d.style.borderColor = 'transparent');
+    noneCell.style.borderColor = '#fff';
+    updatePreview();
+  };
+  noneCell.className = 'icon-cell';
+  iconGrid.appendChild(noneCell);
+
+  for (const [key, inner] of Object.entries(iconLibrary)) {
+    const cell = document.createElement('div');
+    cell.className = 'icon-cell';
+    cell.style.cssText = 'width:100%;aspect-ratio:1;border-radius:8px;cursor:pointer;display:flex;align-items:center;justify-content:center;color:#e2e8f0;border:2px solid ' + (key === selectedIcon ? '#fff' : 'transparent') + ';background:rgba(255,255,255,0.05);transition:border 0.15s,background 0.15s;';
+    cell.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:28px;height:28px;">' + inner + '</svg>';
+    cell.title = key;
+    cell.onmouseenter = () => { cell.style.background = 'rgba(255,255,255,0.12)'; };
+    cell.onmouseleave = () => { cell.style.background = 'rgba(255,255,255,0.05)'; };
+    cell.onclick = () => {
+      selectedIcon = key;
+      iconGrid.querySelectorAll('.icon-cell').forEach(d => d.style.borderColor = 'transparent');
+      cell.style.borderColor = '#fff';
+      updatePreview();
+    };
+    iconGrid.appendChild(cell);
+  }
+  modal.appendChild(iconGrid);
+
+  // Actions
+  const actions = document.createElement('div');
+  actions.className = 'tterm-modal-actions';
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'tterm-modal-btn';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.onclick = () => overlay.remove();
+  const saveBtn = document.createElement('button');
+  saveBtn.className = 'tterm-modal-btn primary';
+  saveBtn.textContent = 'Save';
+  saveBtn.onclick = async () => {
+    try {
+      await fetch('/api/project-settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project: projectName, icon: selectedIcon, color: selectedColor }),
+      });
+      _projectSettings[projectName] = { icon: selectedIcon, color: selectedColor };
+      delete projectColors[projectName]; // Clear hash cache
+      rerenderDashboard(); // Re-render picker without network calls
+    } catch(e) {}
+    overlay.remove();
+  };
+  actions.appendChild(cancelBtn);
+  actions.appendChild(saveBtn);
+  modal.appendChild(actions);
+
+  overlay.appendChild(modal);
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  document.body.appendChild(overlay);
 }
 
 function renderFavorites(projects, pinned) {
@@ -276,6 +579,9 @@ function renderDashboard(projects, pinned) {
         ' onclick="cardClick(\'' + esc + '\')"' +
         ' oncontextmenu="event.preventDefault();toggleFav(\'' + esc + '\')">' +
         (isFav ? '<div class="card-star">\u2605</div>' : '') +
+        '<div class="card-edit-btn" onclick="event.stopPropagation();showAppearancePicker(\'' + esc + '\')" title="Edit icon &amp; color">' +
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/></svg>' +
+        '</div>' +
         '<div class="project-card-header">' +
           '<div class="project-icon" style="background:linear-gradient(135deg, ' + color + ', ' + adjustColor(color, 40) + ')">' +
             (getProjectIcon(p.name) || terminalIcon) + convDot +
@@ -551,7 +857,7 @@ function openSession(name, isShell, continueFlag, resumeId) {
         // Live PTY exists — reattach
         _doOpenSession(name, isShell, true, null, id);
       } else {
-        // No live PTY — fresh start
+        // No live PTY — fresh start (server will send jsonl-ready when JSONL attaches)
         delete messengerMessages[id];
         messengerMessages[id] = [];
         _doOpenSession(name, isShell, false, null, id);
@@ -742,6 +1048,23 @@ function _doOpenSession(name, isShell, continueFlag, resumeId, id) {
         if (sessions[id]) sessions[id].isThinking = false;
         showMessengerTyping(id, false);
         showPromptNotification(id);
+      } else if (msg.type === 'jsonl-ready') {
+        // Server confirmed which JSONL is active — safe to load history
+        if (sessions[id]) {
+          sessions[id]._jsonlSessionId = msg.sessionId;
+        }
+        // Load history if messenger is empty for this session
+        if (!messengerMessages[id] || messengerMessages[id].length === 0) {
+          delete cachedPanes[id];
+          renderMessenger();
+        }
+      } else if (msg.type === 'jsonl-cleared') {
+        // /clear happened — clean slate, wait for new jsonl-ready
+        delete messengerMessages[id];
+        delete cachedPanes[id];
+        messengerMessages[id] = [];
+        if (sessions[id]) sessions[id]._jsonlSessionId = null;
+        renderMessenger();
       } else if (msg.type === 'user-input') {
         // Input from another device — show in messenger if it looks like a message (not just \r or control chars)
         const text = (msg.data || '').replace(/\r$/, '').trim();
@@ -760,8 +1083,8 @@ function _doOpenSession(name, isShell, continueFlag, resumeId, id) {
   }
 
   function handleWsClose() {
-    // Auto-reconnect if session still exists (not intentionally closed)
-    if (!sessions[id]) return;
+    // Auto-reconnect if session still exists (not intentionally closed or killed)
+    if (!sessions[id] || sessions[id]._killed) return;
     sessions[id]._reconnecting = true;
     renderTabs();
     // Reconnect as continue
@@ -911,9 +1234,11 @@ function _doOpenSession(name, isShell, continueFlag, resumeId, id) {
     }).catch(() => {});
   });
 
-  renderTabs();
-  switchTab(id);
-  saveState();
+  if (!window._bulkRestore) {
+    renderTabs();
+    switchTab(id);
+    saveState();
+  }
 }
 
 function closeSession(id) {
@@ -1109,6 +1434,9 @@ function showTabMenu(sessionId, event) {
   killBtn.onclick = () => {
     const s = sessions[sessionId];
     if (!s) return;
+    // Close WS first with no-reconnect flag to prevent auto-reconnect race
+    s._killed = true;
+    if (s.ws && s.ws.readyState === WebSocket.OPEN) s.ws.close();
     fetch('/api/kill', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1512,6 +1840,11 @@ window.addEventListener('DOMContentLoaded', function init() {
     document.querySelectorAll('.layout-btn').forEach(b => {
       b.classList.toggle('active', b.dataset.layout === layout);
     });
+    // Clean slate — clear stale messenger caches from previous page load
+    for (const k of Object.keys(cachedPanes)) delete cachedPanes[k];
+    for (const k of Object.keys(messengerMessages)) delete messengerMessages[k];
+    // Suppress rendering during bulk restore — one render at the end
+    window._bulkRestore = true;
     for (const tab of saved.tabs) {
       openSession(tab.name, tab.isShell || false, !tab.isShell);
       // Restore mute state
@@ -1520,6 +1853,7 @@ window.addEventListener('DOMContentLoaded', function init() {
         sessions[sid].muted = true;
       }
     }
+    window._bulkRestore = false;
     // Restore pane assignments
     if (saved.panes && saved.panes.length > 0) {
       for (let i = 0; i < saved.panes.length; i++) {
@@ -1528,16 +1862,20 @@ window.addEventListener('DOMContentLoaded', function init() {
           if (sid) paneSlots[i] = sid;
         }
       }
-      renderPanes();
     }
     // Restore tab order
     if (saved.tabOrder && saved.tabOrder.length > 0) {
       tabOrder = saved.tabOrder.map(name => Object.keys(sessions).find(k => sessions[k].name === name)).filter(Boolean);
     }
+    // Set active tab
     if (saved.active) {
       const id = Object.keys(sessions).find(k => sessions[k].name === saved.active);
-      if (id) switchTab(id);
+      if (id) activeSessionId = id;
     }
+    // Single render pass — all sessions exist, paneSlots correct, no wasted renders
+    renderTabs();
+    renderPanes();
+    if (activeSessionId) loadStats(activeSessionId);
   } else {
     showPicker();
   }

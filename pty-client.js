@@ -12,7 +12,7 @@
 const net = require('net');
 const readline = require('readline');
 
-const DAEMON_PORT = 7779;
+const DAEMON_PORT = 5041;
 const DAEMON_HOST = '127.0.0.1';
 
 const args = process.argv.slice(2);
